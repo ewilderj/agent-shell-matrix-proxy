@@ -260,7 +260,8 @@ class ProxyBot:
             try:
                 room_id = req.get("room_id", "")
                 is_typing = req.get("typing", True)
-                await self.client.room_typing(room_id, is_typing, timeout=30000)
+                result = await self.client.room_typing(room_id, is_typing, timeout=30000)
+                logger.info(f"Typing indicator {is_typing} for {room_id}: {result}")
                 return {"status": "ok"}
             except Exception as e:
                 logger.warning(f"Typing indicator error: {e}")
