@@ -4,18 +4,28 @@ set -e
 # Curl test suite for matrix-proxy-bot handoff endpoints
 # 
 # Prerequisites:
-#   - Bot running: uv run matrix_proxy_bot
+#   - Bot running: bash run.sh (in another terminal)
 #   - Bot account created and logged in
 #   - .env configured with WEBHOOK_SECRET
 #
 # Usage:
+#   cd ~/git/matrix-proxy-bot
 #   bash tests/curl_tests.sh
 
 BOT_URL="http://127.0.0.1:8765"
-WEBHOOK_SECRET="${WEBHOOK_SECRET:-$(grep WEBHOOK_SECRET .env | cut -d= -f2)}"
 
+# Load WEBHOOK_SECRET from .env in the project root
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="$PROJECT_ROOT/.env"
+
+if [ ! -f "$ENV_FILE" ]; then
+    echo "Error: .env file not found at $ENV_FILE"
+    exit 1
+fi
+
+WEBHOOK_SECRET=$(grep "^WEBHOOK_SECRET=" "$ENV_FILE" | cut -d= -f2)
 if [ -z "$WEBHOOK_SECRET" ]; then
-    echo "Error: WEBHOOK_SECRET not found in .env or env var"
+    echo "Error: WEBHOOK_SECRET not found in $ENV_FILE"
     exit 1
 fi
 
