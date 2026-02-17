@@ -225,10 +225,6 @@ class ProxyBot:
                         topic=f"Agent shell session from {req.hostname}",
                         invite=self.config.allowed_users,
                         visibility=RoomVisibility.private,
-                        initial_state=[{
-                            "type": "m.room.encryption",
-                            "content": {"algorithm": "m.megolm.v1.aes-sha2"},
-                        }],
                     )
                     
                     if not isinstance(result, RoomCreateResponse):
