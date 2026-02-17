@@ -358,8 +358,13 @@ class ProxyBot:
         logger.info("Starting Matrix sync loop...")
         self.sync_task = asyncio.create_task(self._sync_loop())
 
-        # Wait for both
-        await asyncio.gather(server_task, self.sync_task)
+        # Wait for both (don't die if one fails)
+        results = await asyncio.gather(server_task, self.sync_task, return_exceptions=True)
+        
+        # Log any exceptions but don't re-raise (keep bot alive)
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Task {i} failed with exception: {result}", exc_info=result)
 
     async def _ttl_scheduler(self):
         """Background task to auto-return expired sessions."""
