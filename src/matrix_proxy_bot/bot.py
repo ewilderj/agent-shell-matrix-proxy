@@ -185,11 +185,15 @@ class ProxyBot:
                         if room_info.content.get("membership") not in ("join", "invite"):
                             logger.info(f"User not in room {room_id}, reinviting...")
                             await self.client.room_invite(room_id, self.config.user_id)
+                            logger.info(f"Reinvite successful for {self.config.user_id}")
+                        else:
+                            logger.info(f"User already in room {room_id} with membership={room_info.content.get('membership')}")
                     except Exception as e:
                         # If we can't check membership, try reinviting anyway
                         logger.warning(f"Could not check membership: {e}, attempting reinvite...")
                         try:
                             await self.client.room_invite(room_id, self.config.user_id)
+                            logger.info(f"Reinvite successful after exception for {self.config.user_id}")
                         except Exception as invite_err:
                             logger.error(f"Reinvite failed: {invite_err}")
                     

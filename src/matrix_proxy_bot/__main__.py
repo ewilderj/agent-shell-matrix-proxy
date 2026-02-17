@@ -32,6 +32,10 @@ if env_path.exists():
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+# Suppress noisy debug loggers
+logging.getLogger("nio.responses").setLevel(logging.WARNING)
+logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+
 
 async def main():
     """Run the proxy bot."""
