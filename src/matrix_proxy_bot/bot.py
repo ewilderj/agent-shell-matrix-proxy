@@ -13,8 +13,9 @@ import markdown
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import uvicorn
-from nio import AsyncClient, RoomMessageText, SyncResponse, RoomCreateResponse, RoomVisibility
+from nio import AsyncClient, RoomMessageText, SyncResponse, RoomCreateResponse, RoomVisibility, MatrixRoom
 from nio.responses import LoginResponse, LoginError, KeysQueryError
+from nio.events.room_events import UnknownEvent
 
 # E2E encryption (optional)
 try:
@@ -51,6 +52,14 @@ from matrix_proxy_bot.config import Config
 from matrix_proxy_bot.db import SessionDB
 
 logger = logging.getLogger(__name__)
+
+
+class _FakeVerificationEvent:
+    """Minimal adapter so Sas can consume in-room verification event content."""
+
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
 
 
 # Request/Response models
@@ -168,6 +177,7 @@ class ProxyBot:
         self.cross_signing_keys = None
         self.sas_in_progress: dict[str, Sas] = {}
         self.pending_verification_requests: dict[str, tuple[str, str]] = {}
+        self.in_room_verifications: dict[str, tuple[str, str, str]] = {}
 
         # FastAPI app for webhook server
         self.app = FastAPI(title="matrix-proxy-bot")
@@ -429,9 +439,10 @@ class ProxyBot:
         
         self.client.add_event_callback(on_message, RoomMessageText)
 
-        # Register verification callback (E2E)
+        # Register verification callbacks (E2E)
         if HAS_E2E:
             self.client.add_to_device_callback(self._on_to_device_verification, ToDeviceEvent)
+            self.client.add_event_callback(self._on_room_verification, UnknownEvent)
 
         # Start webhook server (runs in background)
         logger.info(
@@ -897,3 +908,219 @@ Last message: {session['last_message_at']}"""
         else:
             if isinstance(response, KeysQueryError):
                 logger.warning("Key query failed for %s: %s", user_id, response.message)
+
+    # ── In-room verification ────────────────────────────────────────────
+
+    async def _on_room_verification(self, room: MatrixRoom, event: "UnknownEvent"):
+        """Handle in-room SAS verification events."""
+        if event.sender == self.client.user_id:
+            return
+
+        event_type = event.type
+        content = event.source.get("content", {})
+
+        # Initial request comes as m.room.message with msgtype m.key.verification.request
+        if event_type == "m.room.message" and content.get("msgtype") == "m.key.verification.request":
+            await self._handle_in_room_verification(room, event.sender, event.event_id, content)
+            return
+
+        if not event_type.startswith("m.key.verification."):
+            return
+
+        relates_to = content.get("m.relates_to", {})
+        if relates_to.get("rel_type") != "m.reference":
+            return
+        ref_event_id = relates_to.get("event_id")
+        if not ref_event_id or ref_event_id not in self.in_room_verifications:
+            return
+
+        room_id, sender, from_device = self.in_room_verifications[ref_event_id]
+        if event.sender != sender:
+            return
+
+        logger.info("In-room verification event %s from %s", event_type, sender)
+
+        if event_type == "m.key.verification.start":
+            await self._handle_in_room_start(room_id, ref_event_id, sender, from_device, content)
+        elif event_type == "m.key.verification.key":
+            await self._handle_in_room_key(room_id, ref_event_id, content)
+        elif event_type == "m.key.verification.mac":
+            await self._handle_in_room_mac(room_id, ref_event_id, sender, content)
+        elif event_type == "m.key.verification.done":
+            logger.info("✅ In-room verification done acknowledged by %s", sender)
+            self.in_room_verifications.pop(ref_event_id, None)
+        elif event_type == "m.key.verification.cancel":
+            logger.warning("In-room verification cancelled by %s: %s",
+                           sender, content.get("reason", "unknown"))
+            self.in_room_verifications.pop(ref_event_id, None)
+
+    async def _handle_in_room_verification(
+        self, room: MatrixRoom, sender: str, event_id: str, req: dict
+    ) -> None:
+        """Handle in-room m.key.verification.request → send ready."""
+        logger.info("Received in-room verification request from %s (event %s)", sender, event_id)
+        if not self.client or not self.client.olm:
+            return
+
+        from_device = req.get("from_device")
+        if not from_device:
+            logger.warning("In-room verification request missing from_device")
+            return
+
+        await self._query_user_keys(sender)
+        try:
+            device_store = self.client.device_store[sender]
+        except KeyError:
+            logger.warning("No device store for %s", sender)
+            return
+        device = device_store.get(from_device)
+        if not device:
+            logger.warning("Device %s not found for %s", from_device, sender)
+            return
+
+        self.in_room_verifications[event_id] = (room.room_id, sender, from_device)
+
+        await self._send_room_verification_event(
+            room.room_id,
+            event_id,
+            "m.key.verification.ready",
+            {
+                "methods": ["m.sas.v1"],
+                "from_device": self.client.device_id,
+            },
+        )
+        logger.info("Sent in-room verification ready for %s", event_id)
+
+    async def _handle_in_room_start(
+        self, room_id: str, ref_event_id: str, sender: str, from_device: str, content: dict
+    ):
+        """Handle in-room m.key.verification.start → create SAS, send accept+key."""
+        device = self.client.device_store[sender].get(from_device)
+        if not device:
+            logger.warning("Device %s not found for in-room start", from_device)
+            return
+
+        fake_event = _FakeVerificationEvent(
+            sender=sender,
+            transaction_id=ref_event_id,
+            from_device=from_device,
+            method=content.get("method", "m.sas.v1"),
+            key_agreement_protocols=content.get("key_agreement_protocols", []),
+            hashes=content.get("hashes", []),
+            message_authentication_codes=content.get("message_authentication_codes", []),
+            short_authentication_string=content.get("short_authentication_string", []),
+            source={"content": content},
+        )
+
+        sas = Sas.from_key_verification_start(
+            self.client.user_id,
+            self.client.device_id,
+            self.client.olm.account.identity_keys["ed25519"],
+            device,
+            fake_event,
+        )
+
+        if sas.canceled:
+            logger.warning("In-room SAS canceled on start: %s", sas.cancel_reason)
+            return
+
+        self.client.olm.key_verifications[ref_event_id] = sas
+
+        accept_msg = sas.accept_verification()
+        accept_content = accept_msg.content
+        accept_content.pop("transaction_id", None)
+        await self._send_room_verification_event(
+            room_id, ref_event_id, "m.key.verification.accept", accept_content
+        )
+
+        key_msg = sas.share_key()
+        key_content = key_msg.content
+        key_content.pop("transaction_id", None)
+        await self._send_room_verification_event(
+            room_id, ref_event_id, "m.key.verification.key", key_content
+        )
+
+    async def _handle_in_room_key(self, room_id: str, ref_event_id: str, content: dict):
+        """Handle in-room m.key.verification.key → confirm emojis, send MAC."""
+        sas = self.client.olm.key_verifications.get(ref_event_id)
+        if not sas:
+            logger.warning("No SAS for in-room key event %s", ref_event_id)
+            return
+
+        fake_event = _FakeVerificationEvent(
+            sender=sas.other_olm_device.user_id,
+            transaction_id=ref_event_id,
+            key=content.get("key", ""),
+        )
+        sas.receive_key_event(fake_event)
+
+        if sas.canceled:
+            logger.warning("In-room SAS canceled on key: %s", sas.cancel_reason)
+            return
+
+        emoji = sas.get_emoji()
+        formatted = " ".join([e[0] for e in emoji])
+        logger.info("In-room SAS EMOJIS: %s", formatted)
+        logger.info("Auto-confirming in-room SAS match...")
+
+        sas.accept_sas()
+        mac_msg = sas.get_mac()
+        mac_content = mac_msg.content
+        mac_content.pop("transaction_id", None)
+
+        if self.cross_signing_keys and "master" in self.cross_signing_keys:
+            _inject_master_key_mac(
+                sas, mac_content, self.cross_signing_keys["master"], ref_event_id
+            )
+
+        await self._send_room_verification_event(
+            room_id, ref_event_id, "m.key.verification.mac", mac_content
+        )
+
+    async def _handle_in_room_mac(
+        self, room_id: str, ref_event_id: str, sender: str, content: dict
+    ):
+        """Handle in-room m.key.verification.mac → verify device, send done."""
+        sas = self.client.olm.key_verifications.get(ref_event_id)
+        if not sas:
+            logger.warning("No SAS for in-room mac event %s", ref_event_id)
+            return
+
+        fake_event = _FakeVerificationEvent(
+            sender=sender,
+            transaction_id=ref_event_id,
+            mac=content.get("mac", {}),
+            keys=content.get("keys", ""),
+        )
+        sas.receive_mac_event(fake_event)
+
+        if sas.verified:
+            logger.info(
+                "✅ In-room device %s of %s verified!",
+                sas.other_olm_device.device_id,
+                sender,
+            )
+            self.client.verify_device(sas.other_olm_device)
+
+            await self._send_room_verification_event(
+                room_id, ref_event_id, "m.key.verification.done", {}
+            )
+
+            if self.cross_signing_keys:
+                await sign_user_master_key(
+                    self.client, self.cross_signing_keys, sender
+                )
+        elif sas.canceled:
+            logger.warning("In-room SAS canceled on MAC: %s", sas.cancel_reason)
+
+    async def _send_room_verification_event(
+        self, room_id: str, ref_event_id: str, event_type: str, content: dict
+    ):
+        """Send a verification event in-room with m.relates_to reference."""
+        content["m.relates_to"] = {
+            "rel_type": "m.reference",
+            "event_id": ref_event_id,
+        }
+        await self.client.room_send(
+            room_id, event_type, content, ignore_unverified_devices=True
+        )
