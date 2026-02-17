@@ -52,6 +52,17 @@ class SessionDB:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
+    async def find_session_by_id(self, session_id: str, hostname: str) -> Optional[dict]:
+        """Find session record by session_id and hostname (for reuse)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM sessions WHERE session_id = ? AND hostname = ? AND owner = 'matrix'",
+                (session_id, hostname)
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
     async def create_session(
         self,
         room_id: str,

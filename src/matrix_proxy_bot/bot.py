@@ -168,36 +168,48 @@ class ProxyBot:
             logger.info(f"Handoff request: {req.hostname}-{req.session_id}")
             
             try:
-                # Create room
-                session_hash = hashlib.sha256(req.session_id.encode()).hexdigest()[:8]
-                room_name = f"agent-{req.hostname}-{session_hash}"
+                # Check if we already have a room for this session
+                existing = await self.db.find_session_by_id(req.session_id, req.hostname)
                 
-                result = await self.client.room_create(
-                    name=room_name,
-                    topic=f"Agent shell session from {req.hostname}",
-                    invite=self.config.allowed_users,
-                    visibility=RoomVisibility.private
-                )
-                
-                if not isinstance(result, RoomCreateResponse):
-                    logger.error(f"Room creation failed: {result}")
-                    raise HTTPException(status_code=500, detail="Room creation failed")
-                
-                room_id = result.room_id
-                logger.info(f"Created room {room_id}")
-                
-                # Create session in DB
-                await self.db.create_session(
-                    room_id=room_id,
-                    session_id=req.session_id,
-                    session_hash=session_hash,
-                    hostname=req.hostname,
-                    webhook_url=req.webhook_url,
-                    webhook_secret=req.webhook_secret,
-                    quiet_mode=req.quiet_mode,
-                    ttl_seconds=req.ttl_seconds,
-                    initiated_by=self.config.user_id
-                )
+                if existing:
+                    # Reuse existing room
+                    room_id = existing["room_id"]
+                    session_hash = existing["session_hash"]
+                    logger.info(f"Reusing existing room {room_id} for session {req.session_id}")
+                    
+                    # Update owner back to matrix (was emacs, now handing off again)
+                    await self.db.set_owner(room_id, "matrix")
+                else:
+                    # Create new room
+                    session_hash = hashlib.sha256(req.session_id.encode()).hexdigest()[:8]
+                    room_name = f"agent-{req.hostname}-{session_hash}"
+                    
+                    result = await self.client.room_create(
+                        name=room_name,
+                        topic=f"Agent shell session from {req.hostname}",
+                        invite=self.config.allowed_users,
+                        visibility=RoomVisibility.private
+                    )
+                    
+                    if not isinstance(result, RoomCreateResponse):
+                        logger.error(f"Room creation failed: {result}")
+                        raise HTTPException(status_code=500, detail="Room creation failed")
+                    
+                    room_id = result.room_id
+                    logger.info(f"Created room {room_id}")
+                    
+                    # Create session in DB
+                    await self.db.create_session(
+                        room_id=room_id,
+                        session_id=req.session_id,
+                        session_hash=session_hash,
+                        hostname=req.hostname,
+                        webhook_url=req.webhook_url,
+                        webhook_secret=req.webhook_secret,
+                        quiet_mode=req.quiet_mode,
+                        ttl_seconds=req.ttl_seconds,
+                        initiated_by=self.config.user_id
+                    )
                 
                 # Post initial message
                 init_message = f"🔄 Session handed off from {req.hostname}"
