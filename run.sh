@@ -15,6 +15,15 @@ if [ ! -f .env ]; then
     exit 1
 fi
 
-# Run
+# Set up logging
+LOG_DIR="$HOME/.matrix-proxy-bot/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/bot.log"
+
 echo "Starting matrix-proxy-bot..."
-uv run -m matrix_proxy_bot
+echo "Logs: $LOG_FILE"
+echo ""
+
+# Run with tee to both stdout and log file
+uv run -m matrix_proxy_bot 2>&1 | tee "$LOG_FILE"
+
