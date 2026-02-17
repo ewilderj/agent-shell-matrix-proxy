@@ -13,7 +13,7 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "matrix-nio[e2e]>=0.26.1",
+    "matrix-nio>=0.24.0",
     "aiosqlite>=0.20.0",
     "fastapi>=0.114.0",
     "uvicorn>=0.27.0",
