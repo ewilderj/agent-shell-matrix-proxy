@@ -372,6 +372,18 @@ Notifies the bot to return ownership to Emacs and ends the handoff."
     (setq agent-shell-matrix-handoff--state nil)
     (message "✓ Session returned to Emacs")))
 
+;;;###autoload
+(defun agent-shell-matrix-toggle ()
+  "Toggle handoff between Emacs and Matrix.
+If no active handoff, initiates one. If active, returns to Emacs."
+  (interactive)
+  (if agent-shell-matrix-handoff--state
+      (agent-shell-matrix-return)
+    (agent-shell-matrix-handoff)))
+
+(with-eval-after-load 'agent-shell
+  (define-key agent-shell-mode-map (kbd "C-c m") #'agent-shell-matrix-toggle))
+
 ;; Install advice to relay agent output and tool calls to Matrix
 (advice-add 'agent-shell--on-notification :around
             #'agent-shell-matrix-handoff--notification-advice)
