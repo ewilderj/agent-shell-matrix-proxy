@@ -260,6 +260,9 @@ class ProxyBot:
             try:
                 room_id = req.get("room_id", "")
                 is_typing = req.get("typing", True)
+                # Ensure bot has joined the room
+                if room_id not in self.client.rooms:
+                    await self.client.join(room_id)
                 result = await self.client.room_typing(room_id, is_typing, timeout=30000)
                 logger.info(f"Typing indicator {is_typing} for {room_id}: {result}")
                 return {"status": "ok"}
