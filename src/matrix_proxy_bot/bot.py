@@ -209,6 +209,12 @@ class ProxyBot:
                 sync = await self.client.sync(30000)  # 30s timeout
 
                 if isinstance(sync, SyncResponse):
+                    # Handle room invites
+                    for room_id in sync.rooms.invite.keys():
+                        logger.info(f"Invited to room {room_id}, auto-joining...")
+                        await self.client.join(room_id)
+
+                    # Handle messages in joined rooms
                     for room_id, room_info in sync.rooms.join.items():
                         for event in room_info.timeline.events:
                             if isinstance(event, RoomMessageText):
