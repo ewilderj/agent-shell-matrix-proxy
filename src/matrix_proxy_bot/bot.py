@@ -270,7 +270,7 @@ class ProxyBot:
                         if not session.get("quiet_mode"):
                             await self.send_to_room(req.room_id, message, req.formatted_body, req.format)
                     else:
-                        message = f"[Agent] {req.response_text}"
+                        message = req.response_text
                         if not session.get("quiet_mode"):
                             await self.send_to_room(req.room_id, message)
                 
