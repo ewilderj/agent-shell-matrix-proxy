@@ -1007,6 +1007,9 @@ Last message: {session['last_message_at']}"""
         self, room_id: str, ref_event_id: str, sender: str, from_device: str, content: dict
     ):
         """Handle in-room m.key.verification.start → create SAS, send accept+key."""
+        logger.info("In-room start content keys: %s", list(content.keys()))
+        logger.info("In-room start method: %s, protocols: %s", 
+                     content.get("method"), content.get("key_agreement_protocols"))
         device = self.client.device_store[sender].get(from_device)
         if not device:
             logger.warning("Device %s not found for in-room start", from_device)
@@ -1033,8 +1036,11 @@ Last message: {session['last_message_at']}"""
         )
 
         if sas.canceled:
-            logger.warning("In-room SAS canceled on start: %s", sas.cancel_reason)
+            logger.warning("In-room SAS canceled on start: %s (code: %s)", 
+                          sas.cancel_reason, getattr(sas, 'cancel_code', 'unknown'))
             return
+
+        logger.info("SAS created OK, state=%s, we_started=%s", sas.state, sas.we_started_it)
 
         self.client.olm.key_verifications[ref_event_id] = sas
 
