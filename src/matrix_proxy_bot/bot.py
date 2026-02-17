@@ -28,6 +28,8 @@ try:
     from matrix_proxy_bot.cross_signing import (
         bootstrap_cross_signing,
         load_signing_keys,
+        sign_master_key_with_device,
+        sign_user_master_key,
         _inject_master_key_mac,
     )
     HAS_E2E = True
@@ -141,15 +143,22 @@ class ProxyBot:
         self.db_path = db_path
         self.db = SessionDB(db_path)
 
-        # Matrix client
-        self.client = AsyncClient(config.homeserver, config.user_id)
+        # Encryption store
+        self.store_dir = Path.home() / ".agent-shell-matrix-proxy"
+        self.store_dir.mkdir(exist_ok=True)
+        self.store_path = self.store_dir / "nio_store"
+        self.store_path.mkdir(parents=True, exist_ok=True)
+
+        # Matrix client with E2E store
+        self.client = AsyncClient(
+            config.homeserver,
+            config.user_id,
+            device_id=config.device_id or None,
+            store_path=str(self.store_path),
+        )
         self.sync_task = None
         self.webhook_server = None
         self.ttl_task = None
-
-        # Encryption
-        self.store_dir = Path.home() / ".matrix-proxy-bot"
-        self.store_dir.mkdir(exist_ok=True)
         self.cross_signing_keys = None
         self.sas_in_progress: dict[str, Sas] = {}
 
@@ -381,8 +390,13 @@ class ProxyBot:
         # Matrix login
         if self.config.access_token:
             self.client.access_token = self.config.access_token
-            self.client.device_id = self.config.device_id
-            logger.info("Using cached access token")
+            # restore_login triggers loading of olm machine for E2EE
+            self.client.restore_login(
+                self.config.user_id,
+                self.config.device_id,
+                self.config.access_token,
+            )
+            logger.info(f"Restored login as {self.config.user_id} device {self.config.device_id}")
         else:
             logger.info("Logging in with password...")
             response = await self.client.login(
@@ -647,7 +661,10 @@ Last message: {session['last_message_at']}"""
                 content["formatted_body"] = formatted_body
                 content["format"] = format_type
             
-            await self.client.room_send(room_id, "m.room.message", content)
+            await self.client.room_send(
+                room_id, "m.room.message", content,
+                ignore_unverified_devices=True,
+            )
             logger.debug(f"Sent to {room_id}: {message[:50]}...")
         except Exception as e:
             logger.error(f"Failed to send to {room_id}: {e}")
@@ -658,19 +675,30 @@ Last message: {session['last_message_at']}"""
             logger.info("E2E encryption disabled (not installed)")
             return
 
-        try:
-            keys_path = self.store_dir / f"{self.client.device_id}_keys.json"
-            
-            if keys_path.exists():
-                self.cross_signing_keys = load_signing_keys(keys_path)
-                logger.info("Loaded existing cross-signing keys")
-            else:
-                logger.info("Bootstrapping cross-signing keys...")
-                await bootstrap_cross_signing(self.client, self.store_dir)
-                self.cross_signing_keys = load_signing_keys(keys_path)
+        if not self.client.olm:
+            logger.error("E2EE NOT enabled - ensure matrix-nio[e2e] is installed and store_path set")
+            return
 
-            # Enable E2E
-            await self.client.keys_upload()
+        try:
+            # Upload device keys if needed
+            if self.client.should_upload_keys:
+                logger.info("Uploading initial device keys...")
+                await self.client.keys_upload()
+
+            # Bootstrap or load cross-signing keys
+            seeds_path = self.store_dir / "cross_signing_seeds.json"
+            if seeds_path.exists():
+                self.cross_signing_keys = load_signing_keys(str(self.store_dir))
+                logger.info("Loaded existing cross-signing keys")
+            elif self.config.password:
+                logger.info("Bootstrapping cross-signing keys...")
+                self.cross_signing_keys = await bootstrap_cross_signing(
+                    self.client, str(self.store_dir), self.config.password
+                )
+                logger.info("Cross-signing keys bootstrapped")
+            else:
+                logger.warning("No password configured — skipping cross-signing bootstrap")
+
             logger.info("E2E encryption ready")
         except Exception as e:
             logger.error(f"E2E setup error: {e}")
