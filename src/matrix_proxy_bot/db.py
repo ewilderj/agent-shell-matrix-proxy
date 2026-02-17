@@ -108,6 +108,15 @@ class SessionDB:
             await db.commit()
         logger.info(f"Changed owner for room {room_id} to {owner}")
 
+    async def touch(self, room_id: str) -> None:
+        """Update last_message_at timestamp for a session."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE sessions SET last_message_at = ? WHERE room_id = ?",
+                (datetime.utcnow().isoformat(), room_id),
+            )
+            await db.commit()
+
     async def get_owner(self, room_id: str) -> str:
         """Get current owner of a session."""
         session = await self.get_session(room_id)
