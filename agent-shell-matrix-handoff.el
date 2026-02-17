@@ -50,13 +50,13 @@ Set to 0 to disable context replay.")
 (defun agent-shell-matrix-handoff--capture-context (buffer)
   "Capture recent history from BUFFER for Matrix context.
 Returns the last N lines as a string, or empty if disabled."
-  (if (<= agent-shell-matrix-handoff-context-lines 30)
+  (if (<= agent-shell-matrix-handoff-context-lines 0)
       ""
     (with-current-buffer buffer
-      (let ((end (point-max))
-            (start (max 1 (- (point-max) 
-                            (* agent-shell-matrix-handoff-context-lines 80)))))
-        (string-trim (buffer-substring-no-properties start end))))))
+      (let* ((end (point-max))
+             (lines (split-string (buffer-substring-no-properties 1 end) "\n"))
+             (tail (last lines agent-shell-matrix-handoff-context-lines)))
+        (string-trim (string-join tail "\n"))))))
 
 (defun agent-shell-matrix-handoff--call-bot (endpoint method data)
   "Call matrix-proxy-bot ENDPOINT with METHOD and DATA.
@@ -234,8 +234,8 @@ Notifies the bot to return ownership to Emacs and ends the handoff."
   (unless agent-shell-matrix-handoff--state
     (error "No active handoff session"))
   
-  (let ((room-id (alist-get "room_id" agent-shell-matrix-handoff--state))
-        (session-id (alist-get "session_id" agent-shell-matrix-handoff--state)))
+  (let ((room-id (cdr (assoc "room_id" agent-shell-matrix-handoff--state)))
+        (session-id (cdr (assoc "session_id" agent-shell-matrix-handoff--state))))
     
     (agent-shell-matrix-handoff--call-bot
      "/webhook/message"
