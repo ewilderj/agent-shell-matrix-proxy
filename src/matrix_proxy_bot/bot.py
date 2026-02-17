@@ -16,6 +16,7 @@ from nio import (
     RoomMessageText,
     SyncResponse,
 )
+from nio.responses import LoginResponse, LoginError
 
 # E2E encryption (optional)
 try:
@@ -171,8 +172,8 @@ class ProxyBot:
             response = await self.client.login(
                 self.config.password, device_name="matrix-proxy-bot"
             )
-            if response.status_code != "M_OK":
-                raise RuntimeError(f"Login failed: {response}")
+            if isinstance(response, LoginError):
+                raise RuntimeError(f"Login failed: {response.message}")
             logger.info(f"Logged in. Access token: {self.client.access_token}")
             logger.info(f"Device ID: {self.client.device_id}")
             logger.info("Save these to .env to avoid re-login")
@@ -203,30 +204,29 @@ class ProxyBot:
 
     async def _sync_loop(self):
         """Sync with Matrix homeserver, listen for messages and verification."""
-        async with self.client:
-            while True:
-                try:
-                    sync = await self.client.sync(30000)  # 30s timeout
+        while True:
+            try:
+                sync = await self.client.sync(30000)  # 30s timeout
 
-                    if isinstance(sync, SyncResponse):
-                        for room_id, room_info in sync.rooms.join.items():
-                            for event in room_info.timeline.events:
-                                if isinstance(event, RoomMessageText):
-                                    await self._handle_room_message(room_id, event)
-                                elif HAS_E2E:
-                                    # Handle E2E verification events
-                                    if isinstance(event, KeyVerificationStart):
-                                        await self._handle_key_verification_start(room_id, event)
-                                    elif isinstance(event, KeyVerificationKey):
-                                        await self._handle_key_verification_key(room_id, event)
-                                    elif isinstance(event, KeyVerificationMac):
-                                        await self._handle_key_verification_mac(room_id, event)
-                                    elif isinstance(event, KeyVerificationCancel):
-                                        await self._handle_key_verification_cancel(room_id, event)
+                if isinstance(sync, SyncResponse):
+                    for room_id, room_info in sync.rooms.join.items():
+                        for event in room_info.timeline.events:
+                            if isinstance(event, RoomMessageText):
+                                await self._handle_room_message(room_id, event)
+                            elif HAS_E2E:
+                                # Handle E2E verification events
+                                if isinstance(event, KeyVerificationStart):
+                                    await self._handle_key_verification_start(room_id, event)
+                                elif isinstance(event, KeyVerificationKey):
+                                    await self._handle_key_verification_key(room_id, event)
+                                elif isinstance(event, KeyVerificationMac):
+                                    await self._handle_key_verification_mac(room_id, event)
+                                elif isinstance(event, KeyVerificationCancel):
+                                    await self._handle_key_verification_cancel(room_id, event)
 
-                except Exception as e:
-                    logger.error(f"Sync error: {e}")
-                    await asyncio.sleep(5)
+            except Exception as e:
+                logger.error(f"Sync error: {e}")
+                await asyncio.sleep(5)
 
     async def _handle_room_message(self, room_id: str, event: RoomMessageText):
         """Handle incoming Matrix room message."""
