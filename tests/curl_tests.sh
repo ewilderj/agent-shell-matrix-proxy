@@ -30,18 +30,13 @@ if [ -z "$WEBHOOK_SECRET" ]; then
 fi
 
 AUTH_HEADER="Authorization: Bearer $WEBHOOK_SECRET"
-CONTENT_TYPE="Content-Type: application/json"
-
-echo "=== Matrix Proxy Bot: Curl Tests ==="
-echo "Bot URL: $BOT_URL"
-echo "Auth: Bearer ${WEBHOOK_SECRET:0:20}..."
 echo ""
 
 # Test 1: POST /handoff - Initiate session
 echo "Test 1: POST /handoff - Initiate session handoff"
 RESPONSE=$(curl -s -X POST "$BOT_URL/handoff" \
-  -H "$AUTH_HEADER" \
-  -H "$CONTENT_TYPE" \
+  -H "Authorization: Bearer $WEBHOOK_SECRET" \
+  -H "Content-Type: application/json" \
   -d '{
     "session_id": "test-session-001",
     "hostname": "test-laptop",
@@ -73,7 +68,7 @@ sleep 2
 # Test 2: GET /session/{room_id} - Query status
 echo "Test 2: GET /session/{room_id} - Query session status"
 RESPONSE=$(curl -s -X GET "$BOT_URL/session/$ROOM_ID" \
-  -H "$AUTH_HEADER")
+  -H "Authorization: Bearer $WEBHOOK_SECRET")
 
 echo "Response:"
 echo "$RESPONSE" | jq . 2>/dev/null || echo "$RESPONSE"
@@ -82,8 +77,8 @@ echo ""
 # Test 3: POST /webhook/message - Send message response
 echo "Test 3: POST /webhook/message - Agent-shell sends response"
 RESPONSE=$(curl -s -X POST "$BOT_URL/webhook/message" \
-  -H "$AUTH_HEADER" \
-  -H "$CONTENT_TYPE" \
+  -H "Authorization: Bearer $WEBHOOK_SECRET" \
+  -H "Content-Type: application/json" \
   -d "{
     \"room_id\": \"$ROOM_ID\",
     \"session_id\": \"$SESSION_ID\",
@@ -98,8 +93,8 @@ echo ""
 # Test 4: POST /webhook/message with formatted_body
 echo "Test 4: POST /webhook/message - With markdown formatting"
 RESPONSE=$(curl -s -X POST "$BOT_URL/webhook/message" \
-  -H "$AUTH_HEADER" \
-  -H "$CONTENT_TYPE" \
+  -H "Authorization: Bearer $WEBHOOK_SECRET" \
+  -H "Content-Type: application/json" \
   -d "{
     \"room_id\": \"$ROOM_ID\",
     \"session_id\": \"$SESSION_ID\",
@@ -115,8 +110,8 @@ echo ""
 # Test 5: POST /webhook/message with action (command response)
 echo "Test 5: POST /webhook/message - Command response (handoff_end)"
 RESPONSE=$(curl -s -X POST "$BOT_URL/webhook/message" \
-  -H "$AUTH_HEADER" \
-  -H "$CONTENT_TYPE" \
+  -H "Authorization: Bearer $WEBHOOK_SECRET" \
+  -H "Content-Type: application/json" \
   -d "{
     \"room_id\": \"$ROOM_ID\",
     \"session_id\": \"$SESSION_ID\",
@@ -131,7 +126,7 @@ echo ""
 # Test 6: GET /sessions - List all sessions
 echo "Test 6: GET /sessions - List active sessions"
 RESPONSE=$(curl -s -X GET "$BOT_URL/sessions" \
-  -H "$AUTH_HEADER")
+  -H "Authorization: Bearer $WEBHOOK_SECRET")
 
 echo "Response:"
 echo "$RESPONSE" | jq . 2>/dev/null || echo "$RESPONSE"
