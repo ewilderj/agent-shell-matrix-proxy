@@ -1096,12 +1096,11 @@ Last message: {session['last_message_at']}"""
         logger.info("MAC content before inject: keys=%s mac_keys=%s", 
                      mac_content.get("keys", "?"), list(mac_content.get("mac", {}).keys()))
 
-        if self.cross_signing_keys and "master" in self.cross_signing_keys:
-            _inject_master_key_mac(
-                sas, mac_content, self.cross_signing_keys["master"], ref_event_id
-            )
-            logger.info("MAC content after inject: keys=%s mac_keys=%s",
-                         mac_content.get("keys", "?"), list(mac_content.get("mac", {}).keys()))
+        # TODO: re-enable master key MAC injection once basic verification works
+        # if self.cross_signing_keys and "master" in self.cross_signing_keys:
+        #     _inject_master_key_mac(
+        #         sas, mac_content, self.cross_signing_keys["master"], ref_event_id
+        #     )
 
         logger.info("Sending MAC to room %s ref %s", room_id, ref_event_id)
 
