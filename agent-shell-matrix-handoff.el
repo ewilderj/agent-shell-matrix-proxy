@@ -28,7 +28,7 @@
   "State during Matrix handoff session.
 Contains: ((room_id . ID) (session_id . ID) (shell_buffer . BUFFER))")
 
-(defvar agent-shell-matrix-handoff-context-lines 30
+(defvar agent-shell-matrix-handoff-context-lines 0
   "Number of lines to capture from agent-shell buffer for Matrix context.
 Set to 0 to disable context replay.")
 
@@ -207,7 +207,7 @@ Use M-x agent-shell-matrix-return to bring the session back."
                              (cons "webhook_url" "http://127.0.0.1:9999/webhook")
                              (cons "webhook_secret" "test-secret")))
          (handoff-data (if (and context (not (string-empty-p context)))
-                          (append handoff-data (list (cons "message" (format "📋 Context:\n```\n%s\n```" context))))
+                          (append handoff-data (list (cons "message" (format "Context (replay):\n```\n%s\n```" context))))
                           handoff-data))
          (response (agent-shell-matrix-handoff--call-bot
                     "/handoff"
