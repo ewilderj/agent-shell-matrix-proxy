@@ -41,7 +41,7 @@ Set to 0 to disable context replay.")
 (defvar agent-shell-matrix-webhook-port 9999
   "Port for the webhook server.")
 
-(defvar agent-shell-matrix-webhook-host "127.0.0.1"
+(defvar agent-shell-matrix-webhook-host "0.0.0.0"
   "Host for the webhook server to bind to.")
 
 (defvar agent-shell-matrix-webhook-url nil
