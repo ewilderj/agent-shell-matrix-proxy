@@ -304,10 +304,15 @@ class ProxyBot:
     def _validate_auth(self, auth_header: Optional[str]) -> bool:
         """Validate webhook authorization header."""
         if not auth_header:
+            logger.debug("No authorization header provided")
             return False
         if auth_header.startswith("Bearer "):
             token = auth_header[7:]
-            return token == self.config.webhook_secret
+            is_valid = token == self.config.webhook_secret
+            if not is_valid:
+                logger.debug(f"Auth validation failed: token={token[:20]}..., expected={self.config.webhook_secret[:20]}...")
+            return is_valid
+        logger.debug(f"Invalid auth format: {auth_header[:30]}...")
         return False
 
     async def start(self):
