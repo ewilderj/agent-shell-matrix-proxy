@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "matrix-proxy-bot"
+name = "agent-shell-matrix-proxy"
 version = "0.1.0"
 description = "Matrix ↔ Agent-Shell webhook relay bot"
 readme = "README.md"
