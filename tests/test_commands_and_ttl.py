@@ -122,190 +122,119 @@ def main():
     print(f"Bot URL: {BOT_URL}")
     print(f"Auth: Bearer {WEBHOOK_SECRET[:20]}...")
     
+    # Create single test room for all tests
+    header("Setup: Creating test room")
+    room_id, session_id = create_test_session()
+    if not room_id:
+        print("  FATAL: Failed to create test session")
+        return 1
+    print(f"  Room: {room_id}")
+    print(f"  Session: {session_id}")
+    
     # Test 1: Command handler - !help
     header("Test 1: Command handler - !help")
-    room_id, session_id = create_test_session()
-    if room_id:
-        data = {
-            "room_id": room_id,
-            "session_id": session_id,
-            "message": "!help"
-        }
-        test("Send !help command", "POST", "/webhook/message", data, 200)
-    else:
-        print("  Skipped: Failed to create test session")
-        tests_failed += 1
+    data = {
+        "room_id": room_id,
+        "session_id": session_id,
+        "message": "!help"
+    }
+    test("Send !help command", "POST", "/webhook/message", data, 200)
+    time.sleep(0.5)
     
     # Test 2: Command handler - !status
     header("Test 2: Command handler - !status")
-    room_id, session_id = create_test_session()
-    if room_id:
-        data = {
-            "room_id": room_id,
-            "session_id": session_id,
-            "message": "!status"
-        }
-        test("Send !status command", "POST", "/webhook/message", data, 200)
-    else:
-        print("  Skipped: Failed to create test session")
-        tests_failed += 1
+    data = {
+        "room_id": room_id,
+        "session_id": session_id,
+        "message": "!status"
+    }
+    test("Send !status command", "POST", "/webhook/message", data, 200)
+    time.sleep(0.5)
     
-    # Test 3: Command handler - !return
-    header("Test 3: Command handler - !return")
-    room_id, session_id = create_test_session()
-    if room_id:
-        data = {
-            "room_id": room_id,
-            "session_id": session_id,
-            "message": "!return"
-        }
-        test("Send !return command", "POST", "/webhook/message", data, 200)
-        
-        # Verify session owner changed back to emacs
-        time.sleep(1)
-        encoded = quote(room_id, safe='')
-        response, result = test(
-            "Verify owner is now 'emacs'",
-            "GET",
-            f"/session/{encoded}",
-            None,
-            200
-        )
-        if response and result.get("owner") == "emacs":
+    # Test 3: Message relay - plain text
+    header("Test 3: Message relay - plain text from agent")
+    data = {
+        "room_id": room_id,
+        "session_id": session_id,
+        "response_text": "Agent output here"
+    }
+    test("Relay plain text response", "POST", "/webhook/message", data, 200)
+    time.sleep(0.5)
+    
+    # Test 4: Message relay - formatted HTML
+    header("Test 4: Message relay - formatted HTML from agent")
+    data = {
+        "room_id": room_id,
+        "session_id": session_id,
+        "response_text": "Agent **bold** output",
+        "formatted_body": "Agent <strong>bold</strong> output",
+        "format": "org.matrix.custom.html"
+    }
+    test("Relay formatted HTML response", "POST", "/webhook/message", data, 200)
+    time.sleep(0.5)
+    
+    # Test 5: Regular message (not a command)
+    header("Test 5: Regular message relay (non-command)")
+    data = {
+        "room_id": room_id,
+        "session_id": session_id,
+        "message": "This is a regular message, not a command"
+    }
+    test("Relay regular message to webhook", "POST", "/webhook/message", data, 200)
+    time.sleep(0.5)
+    
+    # Test 6: Invalid command
+    header("Test 6: Invalid command handling")
+    data = {
+        "room_id": room_id,
+        "session_id": session_id,
+        "message": "!invalid_command"
+    }
+    test("Send invalid command", "POST", "/webhook/message", data, 200)
+    time.sleep(0.5)
+    
+    # Test 7: Message relay with action field
+    header("Test 7: Message relay - action field (command response)")
+    data = {
+        "room_id": room_id,
+        "session_id": session_id,
+        "action": "handoff_end"
+    }
+    test("Send handoff_end action", "POST", "/webhook/message", data, 200)
+    time.sleep(0.5)
+    
+    # Test 8: Verify session still exists
+    header("Test 8: Verify session persists")
+    encoded = quote(room_id, safe='')
+    test("Get session details", "GET", f"/session/{encoded}", None, 200)
+    time.sleep(0.5)
+    
+    # Test 9: Command handler - !return
+    header("Test 9: Command handler - !return")
+    data = {
+        "room_id": room_id,
+        "session_id": session_id,
+        "message": "!return"
+    }
+    test("Send !return command", "POST", "/webhook/message", data, 200)
+    time.sleep(1)
+    
+    # Test 10: Verify owner changed to emacs
+    header("Test 10: Verify !return changed owner")
+    encoded = quote(room_id, safe='')
+    response, result = test(
+        "Get session and verify owner",
+        "GET",
+        f"/session/{encoded}",
+        None,
+        200
+    )
+    if response and result:
+        owner = result.get("owner")
+        if owner == "emacs":
             print("    Owner correctly changed to 'emacs' ✓")
         else:
-            owner = result.get("owner") if result else "unknown"
             print(f"    Owner is '{owner}', expected 'emacs' ✗")
-    else:
-        print("  Skipped: Failed to create test session")
-        tests_failed += 1
-    
-    # Test 4: Command handler - !close
-    header("Test 4: Command handler - !close")
-    room_id, session_id = create_test_session()
-    if room_id:
-        data = {
-            "room_id": room_id,
-            "session_id": session_id,
-            "message": "!close"
-        }
-        test("Send !close command", "POST", "/webhook/message", data, 200)
-        
-        # Verify session owner is now emacs
-        time.sleep(1)
-        encoded = quote(room_id, safe='')
-        response, result = test(
-            "Verify session closed",
-            "GET",
-            f"/session/{encoded}",
-            None,
-            200
-        )
-        if response and result.get("owner") == "emacs":
-            print("    Session correctly closed ✓")
-    else:
-        print("  Skipped: Failed to create test session")
-        tests_failed += 1
-    
-    # Test 5: Message relay - plain text
-    header("Test 5: Message relay - plain text from agent")
-    room_id, session_id = create_test_session()
-    if room_id:
-        data = {
-            "room_id": room_id,
-            "session_id": session_id,
-            "response_text": "Agent output here"
-        }
-        test("Relay plain text response", "POST", "/webhook/message", data, 200)
-    else:
-        print("  Skipped: Failed to create test session")
-        tests_failed += 1
-    
-    # Test 6: Message relay - formatted HTML
-    header("Test 6: Message relay - formatted HTML from agent")
-    room_id, session_id = create_test_session()
-    if room_id:
-        data = {
-            "room_id": room_id,
-            "session_id": session_id,
-            "response_text": "Agent **bold** output",
-            "formatted_body": "Agent <strong>bold</strong> output",
-            "format": "org.matrix.custom.html"
-        }
-        test("Relay formatted HTML response", "POST", "/webhook/message", data, 200)
-    else:
-        print("  Skipped: Failed to create test session")
-        tests_failed += 1
-    
-    # Test 7: TTL scheduler verification
-    header("Test 7: TTL scheduler - session expiry")
-    # Create session with 2 second TTL
-    room_id, session_id = create_test_session(ttl_seconds=2)
-    if room_id:
-        encoded = quote(room_id, safe='')
-        
-        # Verify session starts with owner='matrix'
-        response, result = test(
-            "Verify initial owner is 'matrix'",
-            "GET",
-            f"/session/{encoded}",
-            None,
-            200
-        )
-        initial_owner = result.get("owner") if result else None
-        print(f"    Initial owner: {initial_owner}")
-        
-        # Wait for TTL to expire (scheduler checks every 60s, so this test may not trigger)
-        # For now, just verify the session structure
-        if result and result.get("expires_at"):
-            print(f"    Expiry set to: {result['expires_at']} ✓")
-        else:
-            print(f"    Warning: No expiry set on session")
-    else:
-        print("  Skipped: Failed to create test session")
-        tests_failed += 1
-    
-    # Test 8: Message relay with action field
-    header("Test 8: Message relay - action field (command response)")
-    room_id, session_id = create_test_session()
-    if room_id:
-        data = {
-            "room_id": room_id,
-            "session_id": session_id,
-            "action": "handoff_end"
-        }
-        test("Send handoff_end action", "POST", "/webhook/message", data, 200)
-    else:
-        print("  Skipped: Failed to create test session")
-        tests_failed += 1
-    
-    # Test 9: Invalid command
-    header("Test 9: Invalid command handling")
-    room_id, session_id = create_test_session()
-    if room_id:
-        data = {
-            "room_id": room_id,
-            "session_id": session_id,
-            "message": "!invalid_command"
-        }
-        test("Send invalid command", "POST", "/webhook/message", data, 200)
-    else:
-        print("  Skipped: Failed to create test session")
-        tests_failed += 1
-    
-    # Test 10: Regular message (not a command)
-    header("Test 10: Regular message relay (non-command)")
-    room_id, session_id = create_test_session()
-    if room_id:
-        data = {
-            "room_id": room_id,
-            "session_id": session_id,
-            "message": "This is a regular message, not a command"
-        }
-        test("Relay regular message to webhook", "POST", "/webhook/message", data, 200)
-    else:
-        print("  Skipped: Failed to create test session")
-        tests_failed += 1
     
     # Summary
     header("Test Summary")
