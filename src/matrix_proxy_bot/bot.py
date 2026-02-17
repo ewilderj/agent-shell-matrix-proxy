@@ -925,10 +925,12 @@ Last message: {session['last_message_at']}"""
 
     async def _on_room_verification(self, room: MatrixRoom, event: "UnknownEvent"):
         """Handle in-room SAS verification events."""
+        event_type = event.type
+        logger.debug("UnknownEvent: type=%s sender=%s", event_type, event.sender)
+
         if event.sender == self.client.user_id:
             return
 
-        event_type = event.type
         content = event.source.get("content", {})
 
         # Initial request comes as m.room.message with msgtype m.key.verification.request
