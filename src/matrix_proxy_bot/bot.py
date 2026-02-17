@@ -13,7 +13,7 @@ import markdown
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import uvicorn
-from nio import AsyncClient, RoomMessageText, SyncResponse, RoomCreateResponse, RoomVisibility, MatrixRoom
+from nio import AsyncClient, RoomMessageText, RoomMessageUnknown, SyncResponse, RoomCreateResponse, RoomVisibility, MatrixRoom
 from nio.responses import LoginResponse, LoginError, KeysQueryError
 from nio.events.room_events import UnknownEvent
 
@@ -438,6 +438,17 @@ class ProxyBot:
                 logger.exception(f"Error handling room message: {e}")
         
         self.client.add_event_callback(on_message, RoomMessageText)
+
+        # Handle RoomMessageUnknown (verification requests arrive as this type)
+        async def on_unknown_message(room, event):
+            try:
+                if HAS_E2E and isinstance(event, RoomMessageUnknown) and event.msgtype == "m.key.verification.request":
+                    content = event.source.get("content", {})
+                    await self._handle_in_room_verification(room, event.sender, event.event_id, content)
+            except Exception as e:
+                logger.exception(f"Error handling unknown message: {e}")
+
+        self.client.add_event_callback(on_unknown_message, RoomMessageUnknown)
 
         # Register verification callbacks (E2E)
         if HAS_E2E:
