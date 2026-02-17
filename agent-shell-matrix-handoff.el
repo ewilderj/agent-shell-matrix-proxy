@@ -28,6 +28,10 @@
   "State during Matrix handoff session.
 Contains: ((room_id . ID) (session_id . ID) (shell_buffer . BUFFER))")
 
+(defvar agent-shell-matrix-handoff-context-lines 30
+  "Number of lines to capture from agent-shell buffer for Matrix context.
+Set to 0 to disable context replay.")
+
 (defvar agent-shell-matrix-webhook-secret "REDACTED-SET-VIA-CUSTOMIZE"
   "Bearer token for authenticating with matrix-proxy-bot.")
 
@@ -42,6 +46,17 @@ Contains: ((room_id . ID) (session_id . ID) (shell_buffer . BUFFER))")
 
 (defvar agent-shell-matrix-webhook-connections nil
   "Hash table of active connections: process -> buffer.")
+
+(defun agent-shell-matrix-handoff--capture-context (buffer)
+  "Capture recent history from BUFFER for Matrix context.
+Returns the last N lines as a string, or empty if disabled."
+  (if (<= agent-shell-matrix-handoff-context-lines 0)
+      ""
+    (with-current-buffer buffer
+      (let ((end (point-max))
+            (start (max 1 (- (point-max) 
+                            (* agent-shell-matrix-handoff-context-lines 80)))))
+        (string-trim (buffer-substring-no-properties start end))))))
 
 (defun agent-shell-matrix-handoff--call-bot (endpoint method data)
   "Call matrix-proxy-bot ENDPOINT with METHOD and DATA.
@@ -186,13 +201,18 @@ Use M-x agent-shell-matrix-return to bring the session back."
          (session-state (map-elt state :session))
          (session-id (alist-get :id session-state))
          (hostname (system-name))
+         (context (agent-shell-matrix-handoff--capture-context (current-buffer)))
+         (handoff-data (list (cons "session_id" session-id)
+                             (cons "hostname" hostname)
+                             (cons "webhook_url" "http://127.0.0.1:9999/webhook")
+                             (cons "webhook_secret" "test-secret")))
+         (handoff-data (if (and context (not (string-empty-p context)))
+                          (append handoff-data (list (cons "message" (format "📋 Context:\n```\n%s\n```" context))))
+                          handoff-data))
          (response (agent-shell-matrix-handoff--call-bot
                     "/handoff"
                     "POST"
-                    (list (cons "session_id" session-id)
-                          (cons "hostname" hostname)
-                          (cons "webhook_url" "http://127.0.0.1:9999/webhook")
-                          (cons "webhook_secret" "test-secret"))))
+                    handoff-data))
          (room-id (alist-get 'room_id response)))
     
     (unless room-id
