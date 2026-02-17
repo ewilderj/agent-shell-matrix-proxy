@@ -224,6 +224,7 @@ class ProxyBot:
                 init_message = f"🔄 Session handed off from {req.hostname}"
                 if req.message:
                     init_message += f"\n{req.message}"
+                    logger.info(f"Context message: {len(req.message)} chars")
                 await self.send_to_room(room_id, init_message)
                 
                 # Build room URL
