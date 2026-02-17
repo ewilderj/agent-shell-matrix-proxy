@@ -39,7 +39,7 @@ except ImportError:
     logger = logging.getLogger(__name__)
     logger.warning(
         "E2E encryption not available. "
-        "Install with: pip install -e '.[e2e]' and build dependencies."
+        "Install with: uv sync --extra e2e (requires libolm build deps)"
     )
 
 from matrix_proxy_bot.config import Config
