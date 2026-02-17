@@ -429,6 +429,12 @@ class ProxyBot:
         logger.info("Setting up E2E encryption...")
         await self._setup_encryption()
 
+        # Initial sync to discover rooms and load device keys
+        logger.info("Performing initial sync...")
+        sync_filter = {"presence": {"types": []}}
+        await self.client.sync(timeout=30000, sync_filter=sync_filter)
+        logger.info(f"Discovered {len(self.client.rooms)} rooms")
+
         # Register event callbacks
         # Wrapper to adapt callback signature with exception handling
         async def on_message(room, event):
@@ -512,7 +518,7 @@ class ProxyBot:
         """Sync with Matrix homeserver, listen for messages."""
         logger.info("Starting sync_forever loop...")
         try:
-            await self.client.sync_forever(timeout=30000)
+            await self.client.sync_forever(timeout=30000, sync_filter={"presence": {"types": []}})
         except Exception as e:
             logger.exception(f"Sync loop crashed: {e}")
             # sync_forever crashed, wait and restart
@@ -1087,11 +1093,17 @@ Last message: {session['last_message_at']}"""
         mac_msg = sas.get_mac()
         mac_content = mac_msg.content
         mac_content.pop("transaction_id", None)
+        logger.info("MAC content before inject: keys=%s mac_keys=%s", 
+                     mac_content.get("keys", "?"), list(mac_content.get("mac", {}).keys()))
 
-        # Skip master key MAC injection for now — basic device verification
-        # still works, cross-signing can be added once verified working
-        # if self.cross_signing_keys and "master" in self.cross_signing_keys:
-        #     _inject_master_key_mac(...)
+        if self.cross_signing_keys and "master" in self.cross_signing_keys:
+            _inject_master_key_mac(
+                sas, mac_content, self.cross_signing_keys["master"], ref_event_id
+            )
+            logger.info("MAC content after inject: keys=%s mac_keys=%s",
+                         mac_content.get("keys", "?"), list(mac_content.get("mac", {}).keys()))
+
+        logger.info("Sending MAC to room %s ref %s", room_id, ref_event_id)
 
         await self._send_room_verification_event(
             room_id, ref_event_id, "m.key.verification.mac", mac_content
