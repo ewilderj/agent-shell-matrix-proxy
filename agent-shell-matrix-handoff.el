@@ -41,6 +41,13 @@ Set to 0 to disable context replay.")
 (defvar agent-shell-matrix-webhook-port 9999
   "Port for the webhook server.")
 
+(defvar agent-shell-matrix-webhook-host "127.0.0.1"
+  "Host for the webhook server to bind to.")
+
+(defvar agent-shell-matrix-webhook-url nil
+  "URL the bot should use to reach the webhook server.
+If nil, defaults to http://<webhook-host>:<webhook-port>/webhook.")
+
 (defvar agent-shell-matrix-webhook-server-process nil
   "Server process listening for webhook calls.")
 
@@ -279,7 +286,7 @@ When a client connects, server-process is the client connection."
            :name "webhook-server"
            :service agent-shell-matrix-webhook-port
            :server t
-           :host "127.0.0.1"
+           :host agent-shell-matrix-webhook-host
            :sentinel 'agent-shell-matrix-webhook--server-sentinel
            :noquery t))
     (message "✓ Webhook server started on :%d" agent-shell-matrix-webhook-port)))
@@ -319,7 +326,10 @@ Use M-x agent-shell-matrix-return to bring the session back."
          (context (agent-shell-matrix-handoff--capture-context (current-buffer)))
          (handoff-data (list (cons "session_id" session-id)
                              (cons "hostname" hostname)
-                             (cons "webhook_url" "http://127.0.0.1:9999/webhook")
+                             (cons "webhook_url" (or agent-shell-matrix-webhook-url
+                                                     (format "http://%s:%d/webhook"
+                                                             agent-shell-matrix-webhook-host
+                                                             agent-shell-matrix-webhook-port)))
                              (cons "webhook_secret" "test-secret")))
          (handoff-data (if (and context (not (string-empty-p context)))
                           (append handoff-data (list (cons "message" context)))
