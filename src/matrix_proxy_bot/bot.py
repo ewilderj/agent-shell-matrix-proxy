@@ -177,6 +177,22 @@ class ProxyBot:
                     session_hash = existing["session_hash"]
                     logger.info(f"Reusing existing room {room_id} for session {req.session_id}")
                     
+                    # Check if user is still in the room, reinvite if needed
+                    try:
+                        room_info = await self.client.room_get_state_event(
+                            room_id, "m.room.member", self.config.user_id
+                        )
+                        if room_info.content.get("membership") not in ("join", "invite"):
+                            logger.info(f"User not in room {room_id}, reinviting...")
+                            await self.client.room_invite(room_id, self.config.user_id)
+                    except Exception as e:
+                        # If we can't check membership, try reinviting anyway
+                        logger.warning(f"Could not check membership: {e}, attempting reinvite...")
+                        try:
+                            await self.client.room_invite(room_id, self.config.user_id)
+                        except Exception as invite_err:
+                            logger.error(f"Reinvite failed: {invite_err}")
+                    
                     # Update owner back to matrix (was emacs, now handing off again)
                     await self.db.set_owner(room_id, "matrix")
                 else:
