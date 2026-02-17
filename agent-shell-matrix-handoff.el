@@ -95,7 +95,6 @@ Returns parsed JSON response."
   "Process incoming webhook message from matrix-proxy-bot."
   (let ((action (alist-get 'action payload))
         (msg (alist-get 'message payload))
-        (response-text (alist-get 'response_text payload))
         (shell-buffer (and agent-shell-matrix-handoff--state
                           (cdr (assoc "shell_buffer" agent-shell-matrix-handoff--state)))))
     
@@ -109,22 +108,7 @@ Returns parsed JSON response."
      (msg
       (when shell-buffer
         (with-current-buffer shell-buffer
-          (shell-maker-submit
-           :input msg
-           :on-finished
-           (lambda (_input output _success)
-             (when (and output agent-shell-matrix-handoff--state)
-               (let ((room-id (cdr (assoc "room_id" agent-shell-matrix-handoff--state)))
-                     (session-id (cdr (assoc "session_id" agent-shell-matrix-handoff--state))))
-                 (when room-id
-                   (agent-shell-matrix-handoff--relay-async
-                    room-id session-id output)))))))))
-     
-     ;; Response from agent relay
-     (response-text
-      (when shell-buffer
-        (with-current-buffer shell-buffer
-          (insert (format "[Agent] %s\n" response-text))))))))
+          (shell-maker-submit :input msg)))))))
 
 (defun agent-shell-matrix-handoff--relay-async (room-id session-id text)
   "Asynchronously relay TEXT to Matrix room via bot webhook.
@@ -157,18 +141,34 @@ Uses url-retrieve to avoid blocking the process filter."
       (when (and room-id (not (string-empty-p text)))
         (agent-shell-matrix-handoff--relay-async room-id session-id text)))))
 
-(defun agent-shell-matrix-handoff--output-advice (orig-fun process string)
-  "Advice around shell-maker output filter to capture responses during handoff."
-  (funcall orig-fun process string)
+(defun agent-shell-matrix-handoff--notification-advice (orig-fun &rest args)
+  "Advice around agent-shell--on-notification to relay to Matrix during handoff."
+  (apply orig-fun args)
   (when agent-shell-matrix-handoff--state
-    (let ((shell-buffer (cdr (assoc "shell_buffer" agent-shell-matrix-handoff--state))))
-      (when (and shell-buffer (eq (process-buffer process) shell-buffer))
-        (setq agent-shell-matrix-handoff--output-buffer
-              (concat agent-shell-matrix-handoff--output-buffer string))
-        (when agent-shell-matrix-handoff--relay-timer
-          (cancel-timer agent-shell-matrix-handoff--relay-timer))
-        (setq agent-shell-matrix-handoff--relay-timer
-              (run-at-time 1.0 nil #'agent-shell-matrix-handoff--flush-output))))))
+    (let* ((notification (plist-get args :notification))
+           (update (map-elt (map-elt notification 'params) 'update))
+           (session-update (and update (map-elt update 'sessionUpdate))))
+      (cond
+       ((equal session-update "agent_message_chunk")
+        (let ((text (map-nested-elt update '(content text))))
+          (when text
+            (setq agent-shell-matrix-handoff--output-buffer
+                  (concat agent-shell-matrix-handoff--output-buffer text))
+            (when agent-shell-matrix-handoff--relay-timer
+              (cancel-timer agent-shell-matrix-handoff--relay-timer))
+            (setq agent-shell-matrix-handoff--relay-timer
+                  (run-at-time 2.0 nil #'agent-shell-matrix-handoff--flush-output)))))
+       ((equal session-update "tool_call")
+        (let ((title (map-elt update 'title)))
+          (when title
+            (agent-shell-matrix-handoff--flush-output)
+            (let ((room-id (cdr (assoc "room_id" agent-shell-matrix-handoff--state)))
+                  (session-id (cdr (assoc "session_id" agent-shell-matrix-handoff--state))))
+              (when room-id
+                (agent-shell-matrix-handoff--relay-async
+                 room-id session-id
+                 (format "🔧 %s" title)))))))))))
+
 (defun agent-shell-matrix-webhook--send-response (process status-code body)
   "Send HTTP response to PROCESS with STATUS-CODE and JSON BODY."
   (let ((response (format "HTTP/1.1 %d OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"
@@ -302,9 +302,9 @@ Notifies the bot to return ownership to Emacs and ends the handoff."
     (setq agent-shell-matrix-handoff--state nil)
     (message "✓ Session returned to Emacs")))
 
-;; Output advice not needed — shell-maker-submit :on-finished handles relay
-;; (advice-add 'shell-maker--output-filter :around
-;;             #'agent-shell-matrix-handoff--output-advice)
+;; Install advice to relay agent output and tool calls to Matrix
+(advice-add 'agent-shell--on-notification :around
+            #'agent-shell-matrix-handoff--notification-advice)
 
 (provide 'agent-shell-matrix-handoff)
 
