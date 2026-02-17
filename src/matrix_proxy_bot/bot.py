@@ -429,7 +429,9 @@ class ProxyBot:
                                     await self._handle_key_verification_cancel(room_id, event)
 
             except Exception as e:
+                import traceback
                 logger.error(f"Sync error: {e}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
                 await asyncio.sleep(5)
 
     async def _handle_room_message(self, room_id: str, event: RoomMessageText):
