@@ -11,7 +11,35 @@ from fastapi import FastAPI, WebSocket, HTTPException, Header, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
-from nio import AsyncClient, RoomMessageText, SyncResponse
+from nio import (
+    AsyncClient,
+    RoomMessageText,
+    SyncResponse,
+)
+
+# E2E encryption (optional)
+try:
+    from nio import (
+        KeyVerificationStart,
+        KeyVerificationAccept,
+        KeyVerificationKey,
+        KeyVerificationMac,
+        KeyVerificationCancel,
+    )
+    from nio.crypto import Sas
+    from matrix_proxy_bot.cross_signing import (
+        bootstrap_cross_signing,
+        load_signing_keys,
+        _inject_master_key_mac,
+    )
+    HAS_E2E = True
+except ImportError:
+    HAS_E2E = False
+    logger = logging.getLogger(__name__)
+    logger.warning(
+        "E2E encryption not available. "
+        "Install with: pip install -e '.[e2e]' and build dependencies."
+    )
 
 from matrix_proxy_bot.config import Config
 from matrix_proxy_bot.db import SessionDB
@@ -35,17 +63,23 @@ class HandoffRequest(BaseModel):
 
 
 class ProxyBot:
-    """Matrix relay bot for agent-shell sessions."""
+    """Matrix relay bot for agent-shell sessions with E2E encryption."""
 
     def __init__(self, config: Config, db_path: Path):
         self.config = config
         self.db_path = db_path
         self.db = SessionDB(db_path)
 
-        # Matrix client
+        # Matrix client with encryption
         self.client = AsyncClient(config.homeserver, config.user_id)
         self.sync_task = None
         self.webhook_server = None
+
+        # Encryption
+        self.store_dir = Path.home() / ".matrix-proxy-bot"
+        self.store_dir.mkdir(exist_ok=True)
+        self.cross_signing_keys = None
+        self.sas_in_progress: dict[str, Sas] = {}
 
         # WebSocket connections from agent-shell clients
         self.active_connections: dict[str, WebSocket] = {}
@@ -143,6 +177,10 @@ class ProxyBot:
             logger.info(f"Device ID: {self.client.device_id}")
             logger.info("Save these to .env to avoid re-login")
 
+        # Set up encryption
+        logger.info("Setting up E2E encryption...")
+        await self._setup_encryption()
+
         # Start webhook server
         logger.info(
             f"Starting webhook server on {self.config.webhook_host}:{self.config.webhook_port}"
@@ -164,7 +202,7 @@ class ProxyBot:
         await asyncio.gather(server_task, self.sync_task)
 
     async def _sync_loop(self):
-        """Sync with Matrix homeserver, listen for messages."""
+        """Sync with Matrix homeserver, listen for messages and verification."""
         async with self.client:
             while True:
                 try:
@@ -175,6 +213,16 @@ class ProxyBot:
                             for event in room_info.timeline.events:
                                 if isinstance(event, RoomMessageText):
                                     await self._handle_room_message(room_id, event)
+                                elif HAS_E2E:
+                                    # Handle E2E verification events
+                                    if isinstance(event, KeyVerificationStart):
+                                        await self._handle_key_verification_start(room_id, event)
+                                    elif isinstance(event, KeyVerificationKey):
+                                        await self._handle_key_verification_key(room_id, event)
+                                    elif isinstance(event, KeyVerificationMac):
+                                        await self._handle_key_verification_mac(room_id, event)
+                                    elif isinstance(event, KeyVerificationCancel):
+                                        await self._handle_key_verification_cancel(room_id, event)
 
                 except Exception as e:
                     logger.error(f"Sync error: {e}")
@@ -231,6 +279,127 @@ class ProxyBot:
             logger.info(f"Sent to Matrix {room_id}: {message[:50]}...")
         except Exception as e:
             logger.error(f"Failed to send to Matrix: {e}")
+
+    async def _setup_encryption(self):
+        """Set up E2E encryption and cross-signing (if available)."""
+        if not HAS_E2E:
+            logger.info("E2E encryption not available (plain-text mode)")
+            return
+        
+        # Load or bootstrap cross-signing keys
+        self.cross_signing_keys = load_signing_keys(str(self.store_dir))
+        
+        if not self.cross_signing_keys:
+            if not self.config.password:
+                logger.info(
+                    "E2E crypto available, but password not set. "
+                    "Set MATRIX_BOT_PASSWORD to enable verification."
+                )
+                return
+            
+            logger.info("Bootstrapping cross-signing keys...")
+            try:
+                self.cross_signing_keys = await bootstrap_cross_signing(
+                    self.client, str(self.store_dir), self.config.password
+                )
+                logger.info("✓ Cross-signing keys installed. Green shield enabled!")
+            except Exception as e:
+                logger.error(f"Failed to bootstrap cross-signing: {e}")
+                self.cross_signing_keys = None
+        else:
+            logger.info("✓ Using existing cross-signing keys")
+
+    async def _handle_key_verification_start(self, room_id: str, event: KeyVerificationStart):
+        """Handle incoming SAS verification request."""
+        logger.info(f"SAS verification started by {event.sender} in {room_id}")
+        
+        # Create SAS session
+        sas = Sas.from_key_verification_start(event.content, event.sender, self.client.device_id)
+        if sas is None:
+            logger.warning("Could not create SAS session")
+            return
+        
+        # Store SAS
+        sas_key = f"{room_id}:{event.sender}"
+        self.sas_in_progress[sas_key] = sas
+        
+        # Send SAS accept
+        accept_content = sas.get_accept()
+        await self.client.to_device(
+            "m.key.verification.accept",
+            {event.sender: {event.device_id: accept_content}},
+        )
+        logger.info(f"Sent SAS accept to {event.sender}")
+
+    async def _handle_key_verification_key(self, room_id: str, event: KeyVerificationKey):
+        """Handle SAS key exchange."""
+        sas_key = f"{room_id}:{event.sender}"
+        sas = self.sas_in_progress.get(sas_key)
+        
+        if not sas:
+            logger.warning(f"No SAS for {event.sender}")
+            return
+        
+        # Process key
+        sas.set_their_pubkey(event.content["key"])
+        logger.info(f"SAS key received from {event.sender}")
+        
+        # Send our key
+        key_content = sas.get_key()
+        await self.client.to_device(
+            "m.key.verification.key",
+            {event.sender: {event.device_id: key_content}},
+        )
+        
+        # Show emoji
+        emoji_str = " ".join(emoji[0] for emoji in sas.get_emoji())
+        logger.info(f"SAS EMOJIS: {emoji_str}")
+        logger.info("Auto-confirming SAS match...")
+        
+        # Auto-confirm
+        mac_content = sas.get_mac()
+        
+        # Inject master key MAC if we have cross-signing keys
+        if self.cross_signing_keys:
+            _inject_master_key_mac(
+                sas, mac_content, self.cross_signing_keys["master"], event.transaction_id
+            )
+        
+        await self.client.to_device(
+            "m.key.verification.mac",
+            {event.sender: {event.device_id: mac_content}},
+        )
+        logger.info(f"SAS MAC sent to {event.sender}")
+
+    async def _handle_key_verification_mac(self, room_id: str, event: KeyVerificationMac):
+        """Handle SAS MAC verification completion."""
+        sas_key = f"{room_id}:{event.sender}"
+        sas = self.sas_in_progress.get(sas_key)
+        
+        if not sas:
+            logger.warning(f"No SAS for {event.sender}")
+            return
+        
+        # Verify their MAC
+        try:
+            sas.verify_mac(event.content["mac"], event.content.get("keys"))
+            logger.info(f"✓ SAS verification successful with {event.sender}")
+            
+            # Mark device as trusted
+            self.client.verify_device(sas.other_olm_device)
+            logger.info(f"✓ Device {sas.other_device_id} marked as trusted")
+            
+        except ValueError as e:
+            logger.error(f"SAS verification failed: {e}")
+        finally:
+            del self.sas_in_progress[sas_key]
+
+    async def _handle_key_verification_cancel(self, room_id: str, event: KeyVerificationCancel):
+        """Handle SAS cancellation."""
+        sas_key = f"{room_id}:{event.sender}"
+        if sas_key in self.sas_in_progress:
+            logger.info(f"SAS cancelled by {event.sender}: {event.content.get('reason')}")
+            del self.sas_in_progress[sas_key]
 
     async def stop(self):
         """Stop bot."""
