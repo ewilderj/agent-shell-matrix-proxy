@@ -382,7 +382,7 @@ If no active handoff, initiates one. If active, returns to Emacs."
     (agent-shell-matrix-handoff)))
 
 (with-eval-after-load 'agent-shell
-  (define-key agent-shell-mode-map (kbd "C-c m") #'agent-shell-matrix-toggle))
+  (define-key agent-shell-mode-map (kbd "C-c H") #'agent-shell-matrix-toggle))
 
 ;; Install advice to relay agent output and tool calls to Matrix
 (advice-add 'agent-shell--on-notification :around
