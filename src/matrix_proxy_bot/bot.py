@@ -346,9 +346,12 @@ class ProxyBot:
         await self._setup_encryption()
 
         # Register event callbacks
-        # Wrapper to adapt callback signature
+        # Wrapper to adapt callback signature with exception handling
         async def on_message(room, event):
-            await self._handle_room_message(room.room_id, event)
+            try:
+                await self._handle_room_message(room.room_id, event)
+            except Exception as e:
+                logger.exception(f"Error handling room message: {e}")
         
         self.client.add_event_callback(on_message, RoomMessageText)
 
@@ -408,38 +411,48 @@ class ProxyBot:
     async def _sync_loop(self):
         """Sync with Matrix homeserver, listen for messages."""
         logger.info("Starting sync_forever loop...")
-        await self.client.sync_forever(timeout=30000)
+        try:
+            await self.client.sync_forever(timeout=30000)
+        except Exception as e:
+            logger.exception(f"Sync loop crashed: {e}")
+            # sync_forever crashed, wait and restart
+            await asyncio.sleep(5)
+            logger.info("Restarting sync loop...")
+            asyncio.create_task(self._sync_loop())
 
     async def _handle_room_message(self, room_id: str, event: RoomMessageText):
         """Handle incoming Matrix room message."""
-        sender = event.sender
-        body = event.body
+        try:
+            sender = event.sender
+            body = event.body
 
-        # Skip bot's own messages
-        if sender == self.config.user_id:
-            return
+            # Skip bot's own messages
+            if sender == self.config.user_id:
+                return
 
-        logger.info(f"Matrix message in {room_id}: {body[:50]}...")
+            logger.info(f"Matrix message in {room_id}: {body[:50]}...")
 
-        # Get session
-        session = await self.db.get_session(room_id)
-        if not session:
-            logger.debug(f"No session for {room_id}, ignoring message")
-            return
+            # Get session
+            session = await self.db.get_session(room_id)
+            if not session:
+                logger.debug(f"No session for {room_id}, ignoring message")
+                return
 
-        # Only relay if owner is 'matrix'
-        if session["owner"] != "matrix":
-            logger.debug(f"Session owner is {session['owner']}, not relaying")
-            return
+            # Only relay if owner is 'matrix'
+            if session["owner"] != "matrix":
+                logger.debug(f"Session owner is {session['owner']}, not relaying")
+                return
 
-        # Check if message is a command
-        parsed = CommandParser.parse(body)
-        
-        if parsed.get("is_command"):
-            await self._handle_command(room_id, parsed, sender)
-        else:
-            # Relay to agent-shell webhook
-            await self._relay_to_webhook(room_id, body, sender)
+            # Check if message is a command
+            parsed = CommandParser.parse(body)
+            
+            if parsed.get("is_command"):
+                await self._handle_command(room_id, parsed, sender)
+            else:
+                # Relay to agent-shell webhook
+                await self._relay_to_webhook(room_id, body, sender)
+        except Exception as e:
+            logger.exception(f"Error handling room message in {room_id}: {e}")
 
     async def _handle_command(self, room_id: str, parsed: dict, sender: str):
         """Execute ! command."""
@@ -559,8 +572,9 @@ Last message: {session['last_message_at']}"""
             "Content-Type": "application/json"
         }
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=5) as resp:
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
                 return await resp.json()
 
     async def send_to_room(self, room_id: str, message: str, formatted_body: str = None, format_type: str = None):
