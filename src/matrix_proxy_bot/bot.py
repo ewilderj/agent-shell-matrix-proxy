@@ -344,7 +344,14 @@ class ProxyBot:
         logger.info("Setting up E2E encryption...")
         await self._setup_encryption()
 
-        # Start webhook server
+        # Register event callbacks
+        # Wrapper to adapt callback signature
+        async def on_message(room, event):
+            await self._handle_room_message(room.room_id, event)
+        
+        self.client.add_event_callback(on_message, RoomMessageText)
+
+        # Start webhook server (runs in background)
         logger.info(
             f"Starting webhook server on {self.config.webhook_host}:{self.config.webhook_port}"
         )
@@ -355,28 +362,15 @@ class ProxyBot:
             log_level=self.config.log_level.lower(),
         )
         self.webhook_server = uvicorn.Server(config)
-        server_task = asyncio.create_task(self.webhook_server.serve())
+        asyncio.create_task(self.webhook_server.serve())
 
-        # Start TTL scheduler
+        # Start TTL scheduler (runs in background)
         logger.info("Starting TTL scheduler...")
-        self.ttl_task = asyncio.create_task(self._ttl_scheduler())
+        asyncio.create_task(self._ttl_scheduler())
 
-        # Start Matrix sync loop
+        # Start Matrix sync loop as a background task too
         logger.info("Starting Matrix sync loop...")
-        self.sync_task = asyncio.create_task(self._sync_loop())
-
-        # Monitor tasks but don't await them - they should run forever
-        async def monitor_tasks():
-            """Monitor tasks and log if they complete."""
-            results = await asyncio.gather(server_task, self.sync_task, self.ttl_task, return_exceptions=True)
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    logger.error(f"Task {i} completed with exception: {result}", exc_info=result)
-                else:
-                    logger.warning(f"Task {i} completed (should run forever!): {result}")
-        
-        # Start monitoring but don't await it - let the event loop run forever
-        asyncio.create_task(monitor_tasks())
+        asyncio.create_task(self._sync_loop())
 
     async def _ttl_scheduler(self):
         """Background task to auto-return expired sessions."""
@@ -412,55 +406,8 @@ class ProxyBot:
 
     async def _sync_loop(self):
         """Sync with Matrix homeserver, listen for messages."""
-        logger.info("Sync loop started, entering sync loop...")
-        while True:
-            try:
-                logger.debug("Calling client.sync(30000) with asyncio timeout...")
-                try:
-                    sync = await asyncio.wait_for(self.client.sync(30000), timeout=35.0)  # 35s to give sync 30s + buffer
-                except asyncio.TimeoutError:
-                    logger.warning("Sync timed out after 35s, reconnecting...")
-                    await asyncio.sleep(1)
-                    continue
-                
-                logger.debug(f"Sync returned: {type(sync).__name__}")
-
-                if isinstance(sync, SyncResponse):
-                    # Handle room invites
-                    for room_id in sync.rooms.invite.keys():
-                        room = self.client.rooms.get(room_id)
-                        if room and room.inviter and room.inviter not in self.config.allowed_users:
-                            logger.warning(f"Ignoring invite from {room.inviter} (not in allowed users)")
-                            continue
-                        logger.info(f"Invited to room {room_id}, auto-joining...")
-                        await self.client.join(room_id)
-
-                    # Handle messages in joined rooms
-                    for room_id, room_info in sync.rooms.join.items():
-                        for event in room_info.timeline.events:
-                            if isinstance(event, RoomMessageText):
-                                if event.sender not in self.config.allowed_users:
-                                    logger.debug(f"Ignoring message from {event.sender}")
-                                    continue
-                                await self._handle_room_message(room_id, event)
-                            elif HAS_E2E:
-                                # Handle E2E verification events
-                                if isinstance(event, KeyVerificationStart):
-                                    await self._handle_key_verification_start(room_id, event)
-                                elif isinstance(event, KeyVerificationKey):
-                                    await self._handle_key_verification_key(room_id, event)
-                                elif isinstance(event, KeyVerificationMac):
-                                    await self._handle_key_verification_mac(room_id, event)
-                                elif isinstance(event, KeyVerificationCancel):
-                                    await self._handle_key_verification_cancel(room_id, event)
-                    
-                    logger.debug("Sync loop iteration completed, going back to next sync...")
-
-            except Exception as e:
-                import traceback
-                logger.error(f"Sync error: {e}")
-                logger.error(f"Traceback: {traceback.format_exc()}")
-                await asyncio.sleep(5)
+        logger.info("Starting sync_forever loop...")
+        await self.client.sync_forever(timeout=30000)
 
     async def _handle_room_message(self, room_id: str, event: RoomMessageText):
         """Handle incoming Matrix room message."""

@@ -46,13 +46,19 @@ async def main():
 
     try:
         await bot.start()
-        # After start() returns, tasks are running. Keep event loop alive with sleep
-        logger.info("Bot started successfully, keeping event loop alive...")
+        # After start() returns, background tasks are running
+        logger.info("Bot started, keeping event loop alive...")
+        # Keep the event loop alive indefinitely
         while True:
-            await asyncio.sleep(3600)  # Sleep for 1 hour at a time
+            await asyncio.sleep(3600)
     except KeyboardInterrupt:
         logger.info("Shutting down...")
         await bot.stop()
+    except Exception as e:
+        import traceback
+        logger.error(f"Bot error: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise
 
 
 if __name__ == "__main__":
