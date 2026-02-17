@@ -28,7 +28,7 @@
   "State during Matrix handoff session.
 Contains: ((room_id . ID) (session_id . ID) (shell_buffer . BUFFER))")
 
-(defvar agent-shell-matrix-handoff-context-lines 0
+(defvar agent-shell-matrix-handoff-context-lines 30
   "Number of lines to capture from agent-shell buffer for Matrix context.
 Set to 0 to disable context replay.")
 
@@ -50,7 +50,7 @@ Set to 0 to disable context replay.")
 (defun agent-shell-matrix-handoff--capture-context (buffer)
   "Capture recent history from BUFFER for Matrix context.
 Returns the last N lines as a string, or empty if disabled."
-  (if (<= agent-shell-matrix-handoff-context-lines 0)
+  (if (<= agent-shell-matrix-handoff-context-lines 30)
       ""
     (with-current-buffer buffer
       (let ((end (point-max))
@@ -61,11 +61,11 @@ Returns the last N lines as a string, or empty if disabled."
 (defun agent-shell-matrix-handoff--call-bot (endpoint method data)
   "Call matrix-proxy-bot ENDPOINT with METHOD and DATA.
 Returns parsed JSON response."
-  (let ((url-request-method method)
-        (url-request-extra-headers
-         (list (cons "Authorization" (format "Bearer %s" agent-shell-matrix-webhook-secret))
-               (cons "Content-Type" "application/json")))
-        (url-request-data (and data (json-encode data))))
+  (let* ((url-request-method method)
+         (url-request-extra-headers
+          (list (cons "Authorization" (format "Bearer %s" agent-shell-matrix-webhook-secret))
+                (cons "Content-Type" "application/json; charset=utf-8")))
+         (url-request-data (and data (encode-coding-string (json-encode data) 'utf-8))))
     (with-current-buffer (url-retrieve-synchronously
                           (concat agent-shell-matrix-bot-url endpoint))
       (goto-char (point-min))
