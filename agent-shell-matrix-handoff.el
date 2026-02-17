@@ -28,8 +28,8 @@
   "State during Matrix handoff session.
 Contains: ((room_id . ID) (session_id . ID) (shell_buffer . BUFFER))")
 
-(defvar agent-shell-matrix-handoff-context-lines 30
-  "Number of lines to capture from agent-shell buffer for Matrix context.
+(defvar agent-shell-matrix-handoff-context-exchanges 2
+  "Number of prompt/response exchanges to include in Matrix context.
 Set to 0 to disable context replay.")
 
 (defvar agent-shell-matrix-webhook-secret "REDACTED-SET-VIA-CUSTOMIZE"
@@ -54,15 +54,48 @@ Set to 0 to disable context replay.")
   "Timer to debounce relay of accumulated output to Matrix.")
 
 (defun agent-shell-matrix-handoff--capture-context (buffer)
-  "Capture recent history from BUFFER for Matrix context.
-Returns the last N lines as a string, or empty if disabled."
-  (if (<= agent-shell-matrix-handoff-context-lines 0)
+  "Capture recent prompt/response exchanges from BUFFER for Matrix context.
+Extracts agent responses (markdown) and user prompts, skipping tool calls
+and collapsed sections."
+  (if (<= agent-shell-matrix-handoff-context-exchanges 0)
       ""
     (with-current-buffer buffer
-      (let* ((end (point-max))
-             (lines (split-string (buffer-substring-no-properties 1 end) "\n"))
-             (tail (last lines agent-shell-matrix-handoff-context-lines)))
-        (string-trim (string-join tail "\n"))))))
+      (let (entries (pos (point-min)))
+        (while (< pos (point-max))
+          (let* ((section (get-text-property pos 'agent-shell-ui-section))
+                 (state (get-text-property pos 'agent-shell-ui-state))
+                 (qid (and state (cdr (assoc :qualified-id state))))
+                 (next (or (next-single-property-change
+                            pos 'agent-shell-ui-section nil (point-max))
+                           (point-max))))
+            (cond
+             ;; Agent response body
+             ((and (eq section 'body) qid
+                   (string-match "agent_message_chunk" qid))
+              (let ((text (string-trim (buffer-substring-no-properties pos next))))
+                (when (> (length text) 0)
+                  (push (cons "response" text) entries))))
+             ;; User prompt (unsectioned text with prompt marker)
+             ((null section)
+              (let ((text (buffer-substring-no-properties pos next)))
+                (when (string-match " ❯ \\([^ \n].+\\)" text)
+                  (let ((prompt (match-string 1 text)))
+                    (setq prompt (replace-regexp-in-string
+                                  "<shell-maker-end-of-prompt>.*" "" prompt t t))
+                    (setq prompt (string-trim prompt))
+                    (when (> (length prompt) 0)
+                      (push (cons "prompt" prompt) entries)))))))
+            (setq pos next)))
+        (let* ((all (reverse entries))
+               (tail (last all (* 2 agent-shell-matrix-handoff-context-exchanges))))
+          (if tail
+              (mapconcat
+               (lambda (pair)
+                 (if (string= (car pair) "prompt")
+                     (format "> %s" (cdr pair))
+                   (cdr pair)))
+               tail "\n\n")
+            ""))))))
 
 (defun agent-shell-matrix-handoff--call-bot (endpoint method data)
   "Call matrix-proxy-bot ENDPOINT with METHOD and DATA.
