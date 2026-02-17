@@ -54,15 +54,15 @@ test_endpoint() {
             --data-raw "$data")
     fi
     
-    http_code=$(echo "$response" | tail -1)
-    body=$(echo "$response" | head -n -1)
+    http_code=$(printf '%s\n' "$response" | tail -1)
+    body=$(printf '%s\n' "$response" | sed '$d')
     
     echo "  Method: $method $path"
     echo "  Status: $http_code (expected $expected_status)"
     
     if [ "$http_code" = "$expected_status" ]; then
         echo "  ✓ PASS"
-        echo "  Response: $(echo "$body" | head -c 100)..."
+        echo "  Response: $(printf '%s\n' "$body" | cut -c1-100)..."
         TESTS_PASSED=$((TESTS_PASSED + 1))
         echo "$body"  # Return response for further processing
         return 0
@@ -134,7 +134,7 @@ fi
 # Test 6: Auth validation - missing auth header
 header "Test 6: Security - Missing auth header"
 response=$(curl -s -w "\n%{http_code}" -X GET "$BOT_URL/sessions")
-http_code=$(echo "$response" | tail -1)
+http_code=$(printf '%s\n' "$response" | tail -1)
 if [ "$http_code" = "403" ] || [ "$http_code" = "401" ]; then
     echo "✓ PASS - Request rejected without auth"
     TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -148,7 +148,7 @@ TESTS_RUN=$((TESTS_RUN + 1))
 header "Test 7: Security - Invalid auth token"
 response=$(curl -s -w "\n%{http_code}" -X GET "$BOT_URL/sessions" \
     -H "Authorization: Bearer invalid_token")
-http_code=$(echo "$response" | tail -1)
+http_code=$(printf '%s\n' "$response" | tail -1)
 if [ "$http_code" = "401" ]; then
     echo "✓ PASS - Invalid token rejected"
     TESTS_PASSED=$((TESTS_PASSED + 1))
@@ -164,7 +164,7 @@ FAKE_ROOM="!nonexistent:eddpod.com"
 ENCODED_FAKE=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$FAKE_ROOM'))" 2>/dev/null)
 response=$(curl -s -w "\n%{http_code}" -X GET "$BOT_URL/session/$ENCODED_FAKE" \
     -H "Authorization: Bearer $WEBHOOK_SECRET")
-http_code=$(echo "$response" | tail -1)
+http_code=$(printf '%s\n' "$response" | tail -1)
 if [ "$http_code" = "404" ]; then
     echo "✓ PASS - Non-existent session returns 404"
     TESTS_PASSED=$((TESTS_PASSED + 1))
