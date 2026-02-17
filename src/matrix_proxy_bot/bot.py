@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime, timedelta
 
+import markdown
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import uvicorn
@@ -271,8 +272,13 @@ class ProxyBot:
                             await self.send_to_room(req.room_id, message, req.formatted_body, req.format)
                     else:
                         message = req.response_text
+                        html = markdown.markdown(
+                            message,
+                            extensions=['fenced_code', 'tables'])
                         if not session.get("quiet_mode"):
-                            await self.send_to_room(req.room_id, message)
+                            await self.send_to_room(
+                                req.room_id, message, html,
+                                "org.matrix.custom.html")
                 
                 await self.db.touch(req.room_id)
                 
