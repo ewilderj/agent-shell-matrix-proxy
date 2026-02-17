@@ -177,13 +177,14 @@ class ProxyBot:
                     session_hash = existing["session_hash"]
                     logger.info(f"Reusing existing room {room_id} for session {req.session_id}")
                     
-                    # Always reinvite user on room reuse to ensure they can access it
-                    try:
-                        logger.info(f"Reinviting user to existing room {room_id}...")
-                        await self.client.room_invite(room_id, self.config.user_id)
-                        logger.info(f"Reinvite successful for {self.config.user_id}")
-                    except Exception as invite_err:
-                        logger.error(f"Reinvite failed: {invite_err}")
+                    # Always reinvite users on room reuse to ensure they can access it
+                    for user_id in self.config.allowed_users:
+                        try:
+                            logger.info(f"Reinviting {user_id} to existing room {room_id}...")
+                            await self.client.room_invite(room_id, user_id)
+                            logger.info(f"Reinvite successful for {user_id}")
+                        except Exception as invite_err:
+                            logger.error(f"Reinvite failed for {user_id}: {invite_err}")
                     
                     # Update owner back to matrix (was emacs, now handing off again)
                     await self.db.set_owner(room_id, "matrix")
