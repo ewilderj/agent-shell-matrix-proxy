@@ -262,7 +262,7 @@ Use M-x agent-shell-matrix-return to bring the session back."
                              (cons "webhook_url" "http://127.0.0.1:9999/webhook")
                              (cons "webhook_secret" "test-secret")))
          (handoff-data (if (and context (not (string-empty-p context)))
-                          (append handoff-data (list (cons "message" (format "Context (replay):\n```\n%s\n```" context))))
+                          (append handoff-data (list (cons "message" context)))
                           handoff-data))
          (response (agent-shell-matrix-handoff--call-bot
                     "/handoff"

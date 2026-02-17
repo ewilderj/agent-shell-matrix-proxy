@@ -223,10 +223,17 @@ class ProxyBot:
                 
                 # Post initial message
                 init_message = f"🔄 Session handed off from {req.hostname}"
-                if req.message:
-                    init_message += f"\n{req.message}"
-                    logger.info(f"Context message: {len(req.message)} chars")
                 await self.send_to_room(room_id, init_message)
+                
+                # Post context as formatted markdown if provided
+                if req.message:
+                    logger.info(f"Context message: {len(req.message)} chars")
+                    html = markdown.markdown(
+                        req.message,
+                        extensions=['fenced_code', 'tables'])
+                    await self.send_to_room(
+                        room_id, req.message, html,
+                        "org.matrix.custom.html")
                 
                 # Build room URL
                 room_url = f"https://element.io/#/room/{room_id}"
