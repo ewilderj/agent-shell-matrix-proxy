@@ -252,6 +252,20 @@ class ProxyBot:
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 raise HTTPException(status_code=500, detail=str(e))
 
+        @self.app.post("/typing")
+        async def set_typing(req: dict, authorization: str = Header(None)):
+            """Set typing indicator in a Matrix room."""
+            if not self._validate_auth(authorization):
+                raise HTTPException(status_code=401, detail="Unauthorized")
+            try:
+                room_id = req.get("room_id", "")
+                is_typing = req.get("typing", True)
+                await self.client.room_typing(room_id, is_typing, timeout=30000)
+                return {"status": "ok"}
+            except Exception as e:
+                logger.warning(f"Typing indicator error: {e}")
+                return {"status": "error", "detail": str(e)}
+
         @self.app.post("/webhook/message")
         async def webhook_message(req: WebhookMessageRequest, authorization: str = Header(None)):
             """Relay response from agent-shell back to Matrix."""

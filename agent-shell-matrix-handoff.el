@@ -53,6 +53,9 @@ Set to 0 to disable context replay.")
 (defvar agent-shell-matrix-handoff--relay-timer nil
   "Timer to debounce relay of accumulated output to Matrix.")
 
+(defvar agent-shell-matrix-handoff--typing nil
+  "Non-nil when typing indicator is active in Matrix room.")
+
 (defun agent-shell-matrix-handoff--capture-context (buffer)
   "Capture recent prompt/response exchanges from BUFFER for Matrix context.
 Extracts agent responses (markdown) and user prompts, skipping tool calls
@@ -140,6 +143,10 @@ Returns parsed JSON response."
      ;; Regular message from user in Matrix - submit to agent via shell-maker
      (msg
       (when shell-buffer
+        (let ((room-id (cdr (assoc "room_id" agent-shell-matrix-handoff--state))))
+          (when room-id
+            (agent-shell-matrix-handoff--set-typing room-id t)
+            (setq agent-shell-matrix-handoff--typing t)))
         (with-current-buffer shell-buffer
           (shell-maker-submit :input msg)))))))
 
@@ -161,8 +168,24 @@ Uses url-retrieve to avoid blocking the process filter."
      (lambda (_status) (kill-buffer))
      nil t)))
 
+(defun agent-shell-matrix-handoff--set-typing (room-id typing)
+  "Asynchronously set typing indicator for ROOM-ID."
+  (let* ((url-request-method "POST")
+         (url-request-extra-headers
+          (list (cons "Authorization" (format "Bearer %s" agent-shell-matrix-webhook-secret))
+                (cons "Content-Type" "application/json; charset=utf-8")))
+         (url-request-data
+          (encode-coding-string
+           (json-encode (list (cons "room_id" room-id)
+                              (cons "typing" (if typing t :json-false))))
+           'utf-8)))
+    (url-retrieve
+     (concat agent-shell-matrix-bot-url "/typing")
+     (lambda (_status) (kill-buffer))
+     nil t)))
+
 (defun agent-shell-matrix-handoff--flush-output ()
-  "Send accumulated agent output to Matrix room."
+  "Send accumulated agent output to Matrix room and stop typing."
   (when (and agent-shell-matrix-handoff--state
              (not (string-empty-p agent-shell-matrix-handoff--output-buffer)))
     (let* ((room-id (cdr (assoc "room_id" agent-shell-matrix-handoff--state)))
@@ -172,7 +195,11 @@ Uses url-retrieve to avoid blocking the process filter."
       (setq agent-shell-matrix-handoff--output-buffer "")
       (setq agent-shell-matrix-handoff--relay-timer nil)
       (when (and room-id (not (string-empty-p text)))
-        (agent-shell-matrix-handoff--relay-async room-id session-id text)))))
+        (agent-shell-matrix-handoff--relay-async room-id session-id text))
+      ;; Stop typing indicator
+      (when (and room-id agent-shell-matrix-handoff--typing)
+        (agent-shell-matrix-handoff--set-typing room-id nil)
+        (setq agent-shell-matrix-handoff--typing nil)))))
 
 (defun agent-shell-matrix-handoff--notification-advice (orig-fun &rest args)
   "Advice around agent-shell--on-notification to relay to Matrix during handoff."
