@@ -805,9 +805,10 @@ Last message: {session['last_message_at']}"""
                 mac_msg = sas.get_mac()
 
                 if self.cross_signing_keys and "master" in self.cross_signing_keys:
-                    _inject_master_key_mac(
-                        sas, mac_msg.content, self.cross_signing_keys["master"], tx_id
-                    )
+                    pass  # Skip master key MAC injection for now
+                    # _inject_master_key_mac(
+                    #     sas, mac_msg.content, self.cross_signing_keys["master"], tx_id
+                    # )
 
                 resp = await self.client.to_device(mac_msg)
                 if isinstance(resp, ToDeviceError):
@@ -1079,10 +1080,10 @@ Last message: {session['last_message_at']}"""
         mac_content = mac_msg.content
         mac_content.pop("transaction_id", None)
 
-        if self.cross_signing_keys and "master" in self.cross_signing_keys:
-            _inject_master_key_mac(
-                sas, mac_content, self.cross_signing_keys["master"], ref_event_id
-            )
+        # Skip master key MAC injection for now — basic device verification
+        # still works, cross-signing can be added once verified working
+        # if self.cross_signing_keys and "master" in self.cross_signing_keys:
+        #     _inject_master_key_mac(...)
 
         await self._send_room_verification_event(
             room_id, ref_event_id, "m.key.verification.mac", mac_content
