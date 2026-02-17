@@ -92,7 +92,7 @@ and collapsed sections."
               (mapconcat
                (lambda (pair)
                  (if (string= (car pair) "prompt")
-                     (format "> %s" (cdr pair))
+                     (format "`> %s`" (cdr pair))
                    (cdr pair)))
                tail "\n\n")
             ""))))))
