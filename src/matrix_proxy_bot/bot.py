@@ -244,12 +244,13 @@ class ProxyBot:
                 elif req.response_text:
                     # Use formatted_body if available, else wrap as [Agent] message
                     if req.formatted_body and req.format:
-                        message = req.formatted_body
+                        message = req.response_text
+                        if not session.get("quiet_mode"):
+                            await self.send_to_room(req.room_id, message, req.formatted_body, req.format)
                     else:
                         message = f"[Agent] {req.response_text}"
-                    
-                    if not session.get("quiet_mode"):
-                        await self.send_to_room(req.room_id, message)
+                        if not session.get("quiet_mode"):
+                            await self.send_to_room(req.room_id, message)
                 
                 await self.db.touch(req.room_id)
                 
@@ -562,14 +563,24 @@ Last message: {session['last_message_at']}"""
             async with session.post(url, json=payload, headers=headers, timeout=5) as resp:
                 return await resp.json()
 
-    async def send_to_room(self, room_id: str, message: str):
-        """Send text message to Matrix room."""
+    async def send_to_room(self, room_id: str, message: str, formatted_body: str = None, format_type: str = None):
+        """Send message to Matrix room with optional HTML formatting.
+        
+        If formatted_body and format_type are provided, sends as formatted message.
+        Otherwise sends as plain text.
+        """
         try:
-            await self.client.room_send(
-                room_id,
-                "m.room.message",
-                {"msgtype": "m.text", "body": message}
-            )
+            content = {
+                "msgtype": "m.text",
+                "body": message
+            }
+            
+            # Add formatting if provided
+            if formatted_body and format_type:
+                content["formatted_body"] = formatted_body
+                content["format"] = format_type
+            
+            await self.client.room_send(room_id, "m.room.message", content)
             logger.debug(f"Sent to {room_id}: {message[:50]}...")
         except Exception as e:
             logger.error(f"Failed to send to {room_id}: {e}")
