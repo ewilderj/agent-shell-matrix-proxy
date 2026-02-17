@@ -209,15 +209,27 @@ class ProxyBot:
                 sync = await self.client.sync(30000)  # 30s timeout
 
                 if isinstance(sync, SyncResponse):
-                    # Handle room invites
+                    # Handle room invites (only from allowed users)
                     for room_id in sync.rooms.invite.keys():
+                        # Get inviter from room state
+                        room = self.client.rooms.get(room_id)
+                        if room and room.inviter and room.inviter not in self.config.allowed_users:
+                            logger.warning(
+                                f"Ignoring invite from {room.inviter} (not in allowed users)"
+                            )
+                            continue
                         logger.info(f"Invited to room {room_id}, auto-joining...")
                         await self.client.join(room_id)
 
-                    # Handle messages in joined rooms
+                    # Handle messages in joined rooms (only from allowed users)
                     for room_id, room_info in sync.rooms.join.items():
                         for event in room_info.timeline.events:
                             if isinstance(event, RoomMessageText):
+                                if event.sender not in self.config.allowed_users:
+                                    logger.debug(
+                                        f"Ignoring message from {event.sender} (not in allowed users)"
+                                    )
+                                    continue
                                 await self._handle_room_message(room_id, event)
                             elif HAS_E2E:
                                 # Handle E2E verification events

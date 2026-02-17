@@ -44,6 +44,11 @@ def _get_log_level():
     return os.getenv("LOG_LEVEL", "INFO").strip()
 
 
+def _get_allowed_users():
+    users_str = os.getenv("ALLOWED_USERS", "@edd:eddpod.com").strip()
+    return [u.strip() for u in users_str.split(",") if u.strip()]
+
+
 @dataclass
 class Config:
     """Bot configuration from environment."""
@@ -63,6 +68,9 @@ class Config:
 
     # Logging
     log_level: str = field(default_factory=_get_log_level)
+
+    # Access control
+    allowed_users: list[str] = field(default_factory=_get_allowed_users)
 
     def validate(self) -> None:
         """Validate required configuration."""
