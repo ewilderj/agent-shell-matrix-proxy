@@ -4,6 +4,7 @@ import asyncio
 import logging
 import json
 import hashlib
+import time
 from pathlib import Path
 from typing import Optional
 from datetime import datetime, timedelta
@@ -13,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import uvicorn
 from nio import AsyncClient, RoomMessageText, SyncResponse, RoomCreateResponse, RoomVisibility
-from nio.responses import LoginResponse, LoginError
+from nio.responses import LoginResponse, LoginError, KeysQueryError
 
 # E2E encryption (optional)
 try:
@@ -23,8 +24,13 @@ try:
         KeyVerificationKey,
         KeyVerificationMac,
         KeyVerificationCancel,
+        ToDeviceError,
+        ToDeviceEvent,
+        ToDeviceMessage,
     )
+    from nio.events.to_device import UnknownToDeviceEvent
     from nio.crypto import Sas
+    from nio.exceptions import LocalProtocolError
     from matrix_proxy_bot.cross_signing import (
         bootstrap_cross_signing,
         load_signing_keys,
@@ -161,6 +167,7 @@ class ProxyBot:
         self.ttl_task = None
         self.cross_signing_keys = None
         self.sas_in_progress: dict[str, Sas] = {}
+        self.pending_verification_requests: dict[str, tuple[str, str]] = {}
 
         # FastAPI app for webhook server
         self.app = FastAPI(title="matrix-proxy-bot")
@@ -421,6 +428,10 @@ class ProxyBot:
                 logger.exception(f"Error handling room message: {e}")
         
         self.client.add_event_callback(on_message, RoomMessageText)
+
+        # Register verification callback (E2E)
+        if HAS_E2E:
+            self.client.add_to_device_callback(self._on_to_device_verification, ToDeviceEvent)
 
         # Start webhook server (runs in background)
         logger.info(
@@ -703,56 +714,186 @@ Last message: {session['last_message_at']}"""
         except Exception as e:
             logger.error(f"E2E setup error: {e}")
 
-    async def _handle_key_verification_start(self, room_id: str, event):
-        """Handle key verification start (SAS)."""
+    async def _on_to_device_verification(self, event: "ToDeviceEvent"):
+        """Handle SAS verification for E2E encryption.
+
+        Implements the full request/ready/start/accept/key/mac/done flow.
+        """
         if not HAS_E2E:
             return
 
-        logger.info(f"Key verification start from {event.sender}")
-        sas = Sas.from_key_verification_start(event, self.client.user_id, self.client.device_id)
-        self.sas_in_progress[room_id] = sas
-
-        await self.client.accept_key_verification(event.transaction_id)
-
-    async def _handle_key_verification_key(self, room_id: str, event):
-        """Handle key verification key exchange."""
-        if not HAS_E2E or room_id not in self.sas_in_progress:
+        if not isinstance(
+            event,
+            (
+                KeyVerificationStart,
+                KeyVerificationAccept,
+                KeyVerificationKey,
+                KeyVerificationMac,
+                UnknownToDeviceEvent,
+            ),
+        ):
             return
 
-        sas = self.sas_in_progress[room_id]
-        sas.set_their_pubkey(event.key)
-
-        emojis = sas.get_emoji()
-        logger.info(f"SAS emojis: {emojis}")
-
-        key_mac_list = sas.get_mac()
-        await self.client.send_key_verification_mac(event.transaction_id, key_mac_list)
-
-    async def _handle_key_verification_mac(self, room_id: str, event):
-        """Handle key verification MAC."""
-        if not HAS_E2E or room_id not in self.sas_in_progress:
-            return
-
-        sas = self.sas_in_progress[room_id]
-        
-        if sas.verify_mac(event.mac, event.transaction_id):
-            logger.info("Verification successful!")
-            
-            if self.cross_signing_keys:
-                _inject_master_key_mac(
-                    self.cross_signing_keys,
-                    sas.we_started_it,
-                    sas.sas_nonemojis
+        # Handle events nio doesn't parse into typed classes
+        if isinstance(event, UnknownToDeviceEvent):
+            event_type = event.source.get("type")
+            if event_type == "m.key.verification.request":
+                await self._handle_verification_request(
+                    event.sender, event.source.get("content", {})
                 )
-            
-            await self.client.confirm_key_verification(event.transaction_id)
-            del self.sas_in_progress[room_id]
-        else:
-            logger.warning("Verification failed!")
-            await self.client.cancel_key_verification(event.transaction_id, "m.key_mismatch")
+            elif event_type == "m.key.verification.ready":
+                await self._handle_verification_ready(
+                    event.sender, event.source.get("content", {})
+                )
+            elif event_type == "m.key.verification.done":
+                tx_id = event.source.get("content", {}).get("transaction_id")
+                if tx_id and tx_id in self.client.key_verifications:
+                    sas = self.client.key_verifications[tx_id]
+                    logger.info(
+                        "✅ Verification done acknowledged by %s (%s)",
+                        event.sender,
+                        sas.other_olm_device.device_id,
+                    )
+            return
 
-    async def _handle_key_verification_cancel(self, room_id: str, event):
-        """Handle key verification cancel."""
-        if room_id in self.sas_in_progress:
-            del self.sas_in_progress[room_id]
-        logger.info(f"Verification cancelled: {event.reason}")
+        tx_id = getattr(event, "transaction_id", None)
+        if not tx_id or tx_id not in self.client.key_verifications:
+            return
+
+        sas = self.client.key_verifications[tx_id]
+
+        if isinstance(event, KeyVerificationStart):
+            logger.info(f"SAS verification start from {event.sender}")
+            if not sas.we_started_it:
+                try:
+                    resp = await self.client.accept_key_verification(tx_id)
+                    if isinstance(resp, ToDeviceError):
+                        logger.warning(f"accept_key_verification failed: {resp}")
+                except LocalProtocolError as exc:
+                    logger.warning(f"Cannot accept verification: {exc}")
+
+        elif isinstance(event, KeyVerificationKey):
+            try:
+                emoji = sas.get_emoji()
+                formatted = " ".join([e[0] for e in emoji])
+                logger.info(f"SAS EMOJIS: {formatted}")
+                logger.info("Auto-confirming SAS match...")
+
+                sas.accept_sas()
+                mac_msg = sas.get_mac()
+
+                if self.cross_signing_keys and "master" in self.cross_signing_keys:
+                    _inject_master_key_mac(
+                        sas, mac_msg.content, self.cross_signing_keys["master"], tx_id
+                    )
+
+                resp = await self.client.to_device(mac_msg)
+                if isinstance(resp, ToDeviceError):
+                    logger.warning(f"send MAC failed: {resp}")
+
+                if sas.verified:
+                    self.client.verify_device(sas.other_olm_device)
+            except Exception as exc:
+                logger.warning(f"SAS emoji confirmation error: {exc}")
+
+        elif isinstance(event, KeyVerificationMac):
+            if sas.verified:
+                logger.info(
+                    "✅ Device %s of %s verified!",
+                    sas.other_olm_device.device_id,
+                    event.sender,
+                )
+                self.client.verify_device(sas.other_olm_device)
+                done_msg = ToDeviceMessage(
+                    "m.key.verification.done",
+                    event.sender,
+                    sas.other_olm_device.device_id,
+                    {"transaction_id": tx_id},
+                )
+                resp = await self.client.to_device(done_msg)
+                if isinstance(resp, ToDeviceError):
+                    logger.warning(f"verification done failed: {resp}")
+                # Cross-sign the user's master key
+                if self.cross_signing_keys:
+                    await sign_user_master_key(
+                        self.client, self.cross_signing_keys, event.sender
+                    )
+
+    async def _handle_verification_request(self, sender: str, req: dict) -> None:
+        """Handle incoming verification request — send ready response."""
+        logger.info(f"Received verification request from {sender}")
+        tx_id = req.get("transaction_id") or req.get("transactionId")
+        other_device = req.get("from_device") or req.get("fromDevice")
+
+        if not self.client or not self.client.olm:
+            return
+        if not tx_id or not other_device:
+            logger.warning("Verification request missing fields: %s", list(req.keys()))
+            return
+
+        await self._query_user_keys(sender)
+        device_store = self.client.device_store[sender]
+        device = device_store.get(other_device)
+        if not device:
+            logger.warning("Verification request device not found for %s (%s)", sender, other_device)
+            return
+
+        self.pending_verification_requests[tx_id] = (sender, other_device)
+        content = {
+            "transaction_id": tx_id,
+            "methods": ["m.sas.v1"],
+            "from_device": self.client.device_id,
+            "timestamp": int(time.time() * 1000),
+        }
+        msg = ToDeviceMessage("m.key.verification.ready", sender, other_device, content)
+        response = await self.client.to_device(msg)
+        if isinstance(response, ToDeviceError):
+            logger.warning("Key verification ready failed for %s: %s", sender, response.message)
+
+    async def _handle_verification_ready(self, sender: str, req: dict) -> None:
+        """Handle verification ready — start SAS."""
+        logger.info("Received verification ready from %s", sender)
+        if not self.client or not self.client.olm:
+            return
+        tx_id = req.get("transaction_id") or req.get("transactionId")
+        other_device = req.get("from_device") or req.get("fromDevice")
+        if not tx_id or not other_device:
+            logger.warning("Verification ready missing fields: %s", list(req.keys()))
+            return
+        if tx_id not in self.pending_verification_requests:
+            logger.warning("Unexpected verification ready for tx_id %s", tx_id)
+            return
+
+        await self._query_user_keys(sender)
+        device_store = self.client.device_store[sender]
+        device = device_store.get(other_device)
+        if not device:
+            logger.warning("Verification ready device not found for %s (%s)", sender, other_device)
+            return
+
+        sas = Sas(
+            self.client.user_id,
+            self.client.device_id,
+            self.client.olm.account.identity_keys["ed25519"],
+            device,
+            transaction_id=tx_id,
+        )
+        self.client.olm.key_verifications[tx_id] = sas
+        response = await self.client.to_device(sas.start_verification())
+        if isinstance(response, ToDeviceError):
+            logger.warning("Key verification start failed for %s: %s", sender, response.message)
+            return
+        self.pending_verification_requests.pop(tx_id, None)
+
+    async def _query_user_keys(self, user_id: str) -> None:
+        """Query device keys for a user."""
+        if not self.client or not self.client.olm:
+            return
+        self.client.olm.add_changed_users({user_id})
+        try:
+            response = await self.client.keys_query()
+        except LocalProtocolError as exc:
+            logger.debug("Key query skipped for %s: %s", user_id, exc)
+        else:
+            if isinstance(response, KeysQueryError):
+                logger.warning("Key query failed for %s: %s", user_id, response.message)
