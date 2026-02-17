@@ -13,12 +13,14 @@ A minimal Matrix bot that relays messages between Matrix and local agent-shell s
 - 💾 **Session tracking** (SQLite)
 - 🔐 **Webhook authentication** (secret key)
 - 🔇 **Quiet mode** (optional: don't echo responses back to Matrix)
+- 👤 **User whitelist** — Only listen to authorized users
 
 ## Setup
 
 ### Prerequisites
 
 - Python 3.13+
+- [uv](https://docs.astral.sh/uv/) — Python package manager
 - A Matrix homeserver with a bot account
 
 ### Quick Install (Plain-Text Mode)
@@ -28,12 +30,10 @@ Works without any build tools:
 ```bash
 git clone https://github.com/yourusername/matrix-proxy-bot ~/git/matrix-proxy-bot
 cd ~/git/matrix-proxy-bot
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+uv sync
 cp .env.example .env
 # Edit .env with your Matrix credentials
-python -m matrix_proxy_bot
+uv run matrix_proxy_bot
 ```
 
 The bot will run in **plain-text mode** (no encryption). Perfect for testing and private homeservers.
@@ -45,13 +45,13 @@ To add E2E encryption and verification, install build tools first:
 **macOS:**
 ```bash
 brew install libolm cmake autoconf automake libtool
-pip install -e '.[e2e]'
+uv sync --extra e2e
 ```
 
 **Linux (Ubuntu/Debian):**
 ```bash
 sudo apt-get install libolm-dev cmake build-essential libssl-dev
-pip install -e '.[e2e]'
+uv sync --extra e2e
 ```
 
 Then set `MATRIX_BOT_PASSWORD` in `.env` before first run. The bot will bootstrap cross-signing keys automatically.
@@ -60,7 +60,7 @@ Then set `MATRIX_BOT_PASSWORD` in `.env` before first run. The bot will bootstra
 
 ```bash
 # Set MATRIX_BOT_PASSWORD in .env, then:
-python -m matrix_proxy_bot
+uv run matrix_proxy_bot
 
 # On first run, bot prints:
 #   Access token: syt_xxx...
@@ -138,14 +138,20 @@ No conversation history stored (stateless relay).
 ## Development
 
 ```bash
+# Install/update dependencies
+uv sync
+
+# Run with E2E support
+uv sync --extra e2e
+
 # Run tests
-pytest -v
+uv run pytest -v
 
 # Format
-ruff format src/
+uv run ruff format src/
 
 # Lint
-ruff check src/
+uv run ruff check src/
 ```
 
 ## License
