@@ -467,28 +467,31 @@ class ProxyBot:
 
     async def _handle_command(self, room_id: str, parsed: dict, sender: str):
         """Execute ! command."""
-        if parsed.get("error"):
-            await self.send_to_room(room_id, f"❌ {parsed['error']}")
-            return
+        try:
+            if parsed.get("error"):
+                await self.send_to_room(room_id, f"❌ {parsed['error']}")
+                return
 
-        action = parsed.get("action")
-        
-        if action == "handoff_end":
-            await self._return_to_emacs(room_id)
-        
-        elif action == "close_session":
-            await self._close_session(room_id)
-        
-        elif action == "session_status":
-            await self._show_status(room_id)
-        
-        elif action == "help":
-            help_text = """Available commands:
+            action = parsed.get("action")
+            
+            if action == "handoff_end":
+                await self._return_to_emacs(room_id)
+            
+            elif action == "close_session":
+                await self._close_session(room_id)
+            
+            elif action == "session_status":
+                await self._show_status(room_id)
+            
+            elif action == "help":
+                help_text = """Available commands:
 !return  — Hand session back to Emacs
 !close   — Archive session
 !status  — Show session status
 !help    — Show this help"""
-            await self.send_to_room(room_id, help_text)
+                await self.send_to_room(room_id, help_text)
+        except Exception as e:
+            logger.error(f"Command handler error: {e}", exc_info=True)
 
     async def _return_to_emacs(self, room_id: str):
         """Return session to Emacs."""
