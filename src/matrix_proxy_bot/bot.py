@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import uvicorn
-from nio import AsyncClient, RoomMessageText, SyncResponse, RoomCreateResponse
+from nio import AsyncClient, RoomMessageText, SyncResponse, RoomCreateResponse, RoomVisibility
 from nio.responses import LoginResponse, LoginError
 
 # E2E encryption (optional)
@@ -160,9 +160,9 @@ class ProxyBot:
         """Set up FastAPI routes."""
 
         @self.app.post("/handoff", response_model=HandoffResponse)
-        async def handoff(req: HandoffRequest, auth: str = Header(None)):
+        async def handoff(req: HandoffRequest, authorization: str = Header(None)):
             """Initiate handoff from agent-shell to Matrix."""
-            if not self._validate_auth(auth):
+            if not self._validate_auth(authorization):
                 raise HTTPException(status_code=401, detail="Unauthorized")
             
             logger.info(f"Handoff request: {req.hostname}-{req.session_id}")
@@ -176,7 +176,7 @@ class ProxyBot:
                     name=room_name,
                     topic=f"Agent shell session from {req.hostname}",
                     invite=self.config.allowed_users,
-                    visibility="private"
+                    visibility=RoomVisibility.private
                 )
                 
                 if not isinstance(result, RoomCreateResponse):
@@ -217,13 +217,15 @@ class ProxyBot:
                 )
             
             except Exception as e:
+                import traceback
                 logger.error(f"Handoff error: {e}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
                 raise HTTPException(status_code=500, detail=str(e))
 
         @self.app.post("/webhook/message")
-        async def webhook_message(req: WebhookMessageRequest, auth: str = Header(None)):
+        async def webhook_message(req: WebhookMessageRequest, authorization: str = Header(None)):
             """Relay response from agent-shell back to Matrix."""
-            if not self._validate_auth(auth):
+            if not self._validate_auth(authorization):
                 raise HTTPException(status_code=401, detail="Unauthorized")
             
             logger.info(f"Webhook message for {req.room_id}")
@@ -258,9 +260,9 @@ class ProxyBot:
                 raise HTTPException(status_code=500, detail=str(e))
 
         @self.app.get("/session/{room_id}", response_model=SessionStatusResponse)
-        async def get_session(room_id: str, auth: str = Header(None)):
+        async def get_session(room_id: str, authorization: str = Header(None)):
             """Query session status."""
-            if not self._validate_auth(auth):
+            if not self._validate_auth(authorization):
                 raise HTTPException(status_code=401, detail="Unauthorized")
             
             session = await self.db.get_session(room_id)
@@ -282,9 +284,9 @@ class ProxyBot:
             )
 
         @self.app.get("/sessions")
-        async def list_sessions(auth: str = Header(None)):
+        async def list_sessions(authorization: str = Header(None)):
             """List all active sessions."""
-            if not self._validate_auth(auth):
+            if not self._validate_auth(authorization):
                 raise HTTPException(status_code=401, detail="Unauthorized")
             
             sessions = await self.db.list_sessions()
@@ -363,13 +365,18 @@ class ProxyBot:
         logger.info("Starting Matrix sync loop...")
         self.sync_task = asyncio.create_task(self._sync_loop())
 
-        # Wait for both (don't die if one fails)
-        results = await asyncio.gather(server_task, self.sync_task, return_exceptions=True)
+        # Monitor tasks but don't await them - they should run forever
+        async def monitor_tasks():
+            """Monitor tasks and log if they complete."""
+            results = await asyncio.gather(server_task, self.sync_task, self.ttl_task, return_exceptions=True)
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(f"Task {i} completed with exception: {result}", exc_info=result)
+                else:
+                    logger.warning(f"Task {i} completed (should run forever!): {result}")
         
-        # Log any exceptions but don't re-raise (keep bot alive)
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.error(f"Task {i} failed with exception: {result}", exc_info=result)
+        # Start monitoring but don't await it - let the event loop run forever
+        asyncio.create_task(monitor_tasks())
 
     async def _ttl_scheduler(self):
         """Background task to auto-return expired sessions."""
@@ -405,9 +412,18 @@ class ProxyBot:
 
     async def _sync_loop(self):
         """Sync with Matrix homeserver, listen for messages."""
+        logger.info("Sync loop started, entering sync loop...")
         while True:
             try:
-                sync = await self.client.sync(30000)  # 30s timeout
+                logger.debug("Calling client.sync(30000) with asyncio timeout...")
+                try:
+                    sync = await asyncio.wait_for(self.client.sync(30000), timeout=35.0)  # 35s to give sync 30s + buffer
+                except asyncio.TimeoutError:
+                    logger.warning("Sync timed out after 35s, reconnecting...")
+                    await asyncio.sleep(1)
+                    continue
+                
+                logger.debug(f"Sync returned: {type(sync).__name__}")
 
                 if isinstance(sync, SyncResponse):
                     # Handle room invites
@@ -437,6 +453,8 @@ class ProxyBot:
                                     await self._handle_key_verification_mac(room_id, event)
                                 elif isinstance(event, KeyVerificationCancel):
                                     await self._handle_key_verification_cancel(room_id, event)
+                    
+                    logger.debug("Sync loop iteration completed, going back to next sync...")
 
             except Exception as e:
                 import traceback

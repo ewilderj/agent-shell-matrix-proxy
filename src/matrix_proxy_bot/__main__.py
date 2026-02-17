@@ -29,7 +29,7 @@ print(f"[STARTUP] load_dotenv returned: {result}", file=sys.stderr)
 if env_path.exists():
     print(f"[STARTUP] WEBHOOK_SECRET loaded: {len(os.getenv('WEBHOOK_SECRET', ''))} chars", file=sys.stderr)
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 
@@ -46,6 +46,10 @@ async def main():
 
     try:
         await bot.start()
+        # After start() returns, tasks are running. Keep event loop alive with sleep
+        logger.info("Bot started successfully, keeping event loop alive...")
+        while True:
+            await asyncio.sleep(3600)  # Sleep for 1 hour at a time
     except KeyboardInterrupt:
         logger.info("Shutting down...")
         await bot.stop()
