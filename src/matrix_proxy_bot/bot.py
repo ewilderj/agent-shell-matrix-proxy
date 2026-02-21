@@ -246,6 +246,9 @@ class ProxyBot:
                     
                     room_id = result.room_id
                     logger.info(f"Created room {room_id}")
+
+                    # Sync to pick up room encryption state before sending
+                    await self.client.sync(timeout=5000, sync_filter={"presence": {"types": []}})
                     
                     # Create session in DB
                     await self.db.create_session(
@@ -721,11 +724,14 @@ Last message: {session['last_message_at']}"""
                 content["formatted_body"] = formatted_body
                 content["format"] = format_type
             
-            await self.client.room_send(
+            resp = await self.client.room_send(
                 room_id, "m.room.message", content,
                 ignore_unverified_devices=True,
             )
-            logger.debug(f"Sent to {room_id}: {message[:50]}...")
+            if hasattr(resp, 'event_id'):
+                logger.debug(f"Sent to {room_id}: {message[:50]}...")
+            else:
+                logger.warning(f"room_send response: {resp}")
         except Exception as e:
             logger.error(f"Failed to send to {room_id}: {e}")
 
