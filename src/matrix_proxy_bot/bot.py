@@ -1023,10 +1023,6 @@ Last message: {session['last_message_at']}"""
             logger.warning("Device %s not found for in-room start", from_device)
             return
 
-        # Strip m.relates_to from content for commitment calculation —
-        # Element doesn't include it in the canonical JSON
-        start_content = {k: v for k, v in content.items() if k != "m.relates_to"}
-
         fake_event = _FakeVerificationEvent(
             sender=sender,
             transaction_id=ref_event_id,
@@ -1036,7 +1032,7 @@ Last message: {session['last_message_at']}"""
             hashes=content.get("hashes", []),
             message_authentication_codes=content.get("message_authentication_codes", []),
             short_authentication_string=content.get("short_authentication_string", []),
-            source={"content": start_content},
+            source={"content": content},
         )
 
         sas = Sas.from_key_verification_start(
