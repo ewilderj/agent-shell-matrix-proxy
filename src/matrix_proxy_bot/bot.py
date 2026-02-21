@@ -661,13 +661,15 @@ class ProxyBot:
             return
 
         expires_line = ""
+        expires_html = ""
         if session["handoff_expires_at"]:
             expires = datetime.fromisoformat(session["handoff_expires_at"])
             time_left = (expires - datetime.utcnow()).total_seconds() / 60
             expires_line = f"\nExpires: {time_left:.0f}m"
+            expires_html = f"<br>Expires: {time_left:.0f}m"
 
         status_text = (
-            f"**Session Status**\n"
+            f"Session Status\n"
             f"Hostname: {session['hostname']}\n"
             f"Session: {session['session_hash']}\n"
             f"Owner: {session['owner']}\n"
@@ -675,7 +677,15 @@ class ProxyBot:
             f"Last message: {session['last_message_at']}"
             f"{expires_line}"
         )
-        html = markdown.markdown(status_text)
+        html = (
+            f"<b>Session Status</b><br>"
+            f"Hostname: {session['hostname']}<br>"
+            f"Session: <code>{session['session_hash']}</code><br>"
+            f"Owner: {session['owner']}<br>"
+            f"Started: {session['initiated_at']}<br>"
+            f"Last message: {session['last_message_at']}"
+            f"{expires_html}"
+        )
         await self.send_to_room(room_id, status_text, html, "org.matrix.custom.html")
 
     async def _relay_to_webhook(self, room_id: str, message: str, sender: str):
