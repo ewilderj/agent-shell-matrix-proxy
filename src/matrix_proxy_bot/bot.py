@@ -219,11 +219,12 @@ class ProxyBot:
                 else:
                     # Create new room — name is agent-{hostname}, with .N suffix if needed
                     session_hash = hashlib.sha256(req.session_id.encode()).hexdigest()[:8]
+                    short_host = req.hostname.split(".")[0]
                     active_count = await self.db.count_active_sessions_for_host(req.hostname)
                     if active_count > 0:
-                        room_name = f"agent-{req.hostname}.{active_count}"
+                        room_name = f"agent-{short_host}.{active_count}"
                     else:
-                        room_name = f"agent-{req.hostname}"
+                        room_name = f"agent-{short_host}"
                     
                     initial_state = []
                     if HAS_E2E:
