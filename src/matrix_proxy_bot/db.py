@@ -64,6 +64,16 @@ class SessionDB:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
+    async def count_active_sessions_for_host(self, hostname: str) -> int:
+        """Count active (matrix-owned) sessions for a hostname."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM sessions WHERE hostname = ? AND owner = 'matrix'",
+                (hostname,)
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
     async def create_session(
         self,
         room_id: str,

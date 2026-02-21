@@ -217,9 +217,13 @@ class ProxyBot:
                     # Update owner back to matrix (was emacs, now handing off again)
                     await self.db.set_owner(room_id, "matrix")
                 else:
-                    # Create new room
+                    # Create new room — name is agent-{hostname}, with .N suffix if needed
                     session_hash = hashlib.sha256(req.session_id.encode()).hexdigest()[:8]
-                    room_name = f"agent-{req.hostname}-{session_hash}"
+                    active_count = await self.db.count_active_sessions_for_host(req.hostname)
+                    if active_count > 0:
+                        room_name = f"agent-{req.hostname}.{active_count}"
+                    else:
+                        room_name = f"agent-{req.hostname}"
                     
                     result = await self.client.room_create(
                         name=room_name,
