@@ -225,11 +225,19 @@ class ProxyBot:
                     else:
                         room_name = f"agent-{req.hostname}"
                     
+                    initial_state = []
+                    if HAS_E2E:
+                        initial_state.append({
+                            "type": "m.room.encryption",
+                            "content": {"algorithm": "m.megolm.v1.aes-sha2"},
+                        })
+
                     result = await self.client.room_create(
                         name=room_name,
                         topic=f"Agent shell session from {req.hostname}",
                         invite=self.config.allowed_users,
                         visibility=RoomVisibility.private,
+                        initial_state=initial_state,
                     )
                     
                     if not isinstance(result, RoomCreateResponse):
