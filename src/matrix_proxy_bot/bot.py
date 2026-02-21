@@ -436,6 +436,13 @@ class ProxyBot:
         await self.client.sync(timeout=30000, sync_filter=sync_filter)
         logger.info(f"Discovered {len(self.client.rooms)} rooms")
 
+        # Sign master key with device key (needs client_session from sync)
+        if HAS_E2E and self.cross_signing_keys:
+            try:
+                await sign_master_key_with_device(self.client, self.cross_signing_keys)
+            except Exception as e:
+                logger.warning(f"sign_master_key_with_device error: {e}")
+
         # Register event callbacks
         # Wrapper to adapt callback signature with exception handling
         async def on_message(room, event):
@@ -731,7 +738,6 @@ Last message: {session['last_message_at']}"""
             if seeds_path.exists():
                 self.cross_signing_keys = load_signing_keys(str(self.store_dir))
                 logger.info("Loaded existing cross-signing keys")
-                await sign_master_key_with_device(self.client, self.cross_signing_keys)
             elif self.config.password:
                 logger.info("Bootstrapping cross-signing keys...")
                 self.cross_signing_keys = await bootstrap_cross_signing(
