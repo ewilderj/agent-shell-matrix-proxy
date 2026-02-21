@@ -582,6 +582,7 @@ class ProxyBot:
             else:
                 # Relay to agent-shell webhook
                 await self._relay_to_webhook(room_id, body, sender)
+                await self.db.touch(room_id)
         except Exception as e:
             logger.exception(f"Error handling room message in {room_id}: {e}")
 

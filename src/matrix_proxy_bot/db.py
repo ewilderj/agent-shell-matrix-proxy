@@ -2,7 +2,7 @@
 
 import aiosqlite
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -131,12 +131,28 @@ class SessionDB:
         logger.info(f"Changed owner for room {room_id} to {owner}")
 
     async def touch(self, room_id: str) -> None:
-        """Update last_message_at timestamp for a session."""
+        """Update last_message_at and reset TTL for a session."""
+        now = datetime.utcnow()
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "UPDATE sessions SET last_message_at = ? WHERE room_id = ?",
-                (datetime.utcnow().isoformat(), room_id),
+            # Get current session to check if it has a TTL
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT handoff_expires_at, created_at FROM sessions WHERE room_id = ?",
+                (room_id,)
             )
+            row = await cursor.fetchone()
+            if row and row["handoff_expires_at"]:
+                # Reset TTL to 4 hours from now
+                new_expires = (now + timedelta(hours=4)).isoformat()
+                await db.execute(
+                    "UPDATE sessions SET last_message_at = ?, handoff_expires_at = ? WHERE room_id = ?",
+                    (now.isoformat(), new_expires, room_id),
+                )
+            else:
+                await db.execute(
+                    "UPDATE sessions SET last_message_at = ? WHERE room_id = ?",
+                    (now.isoformat(), room_id),
+                )
             await db.commit()
 
     async def get_owner(self, room_id: str) -> str:
