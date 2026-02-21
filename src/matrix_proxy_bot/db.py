@@ -34,11 +34,18 @@ class SessionDB:
                     agent_shell_webhook_url TEXT,
                     agent_shell_secret TEXT,
                     quiet_mode BOOLEAN DEFAULT 0,
+                    ttl_seconds INTEGER,
                     handoff_expires_at TEXT
                 )
                 """
             )
             await db.commit()
+            # Migrate: add ttl_seconds column if missing (existing databases)
+            try:
+                await db.execute("ALTER TABLE sessions ADD COLUMN ttl_seconds INTEGER")
+                await db.commit()
+            except Exception:
+                pass  # column already exists
         self.initialized = True
         logger.info(f"Initialized session DB at {self.db_path}")
 
@@ -90,7 +97,6 @@ class SessionDB:
         now = datetime.utcnow().isoformat()
         expires_at = None
         if ttl_seconds:
-            from datetime import timedelta
             expires_at = (datetime.utcnow() + timedelta(seconds=ttl_seconds)).isoformat()
         
         async with aiosqlite.connect(self.db_path) as db:
@@ -99,8 +105,8 @@ class SessionDB:
                 INSERT OR REPLACE INTO sessions 
                 (room_id, session_id, session_hash, hostname, owner, initiated_by, 
                  initiated_at, created_at, last_message_at, agent_shell_webhook_url, 
-                 agent_shell_secret, quiet_mode, handoff_expires_at)
-                VALUES (?, ?, ?, ?, 'matrix', ?, ?, ?, ?, ?, ?, ?, ?)
+                 agent_shell_secret, quiet_mode, ttl_seconds, handoff_expires_at)
+                VALUES (?, ?, ?, ?, 'matrix', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     room_id,
@@ -114,6 +120,7 @@ class SessionDB:
                     webhook_url,
                     webhook_secret,
                     quiet_mode,
+                    ttl_seconds,
                     expires_at,
                 ),
             )
@@ -134,16 +141,15 @@ class SessionDB:
         """Update last_message_at and reset TTL for a session."""
         now = datetime.utcnow()
         async with aiosqlite.connect(self.db_path) as db:
-            # Get current session to check if it has a TTL
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT handoff_expires_at, created_at FROM sessions WHERE room_id = ?",
+                "SELECT handoff_expires_at, ttl_seconds FROM sessions WHERE room_id = ?",
                 (room_id,)
             )
             row = await cursor.fetchone()
             if row and row["handoff_expires_at"]:
-                # Reset TTL to 4 hours from now
-                new_expires = (now + timedelta(hours=4)).isoformat()
+                ttl = row["ttl_seconds"] or 14400  # default 4 hours
+                new_expires = (now + timedelta(seconds=ttl)).isoformat()
                 await db.execute(
                     "UPDATE sessions SET last_message_at = ?, handoff_expires_at = ? WHERE room_id = ?",
                     (now.isoformat(), new_expires, room_id),
@@ -154,6 +160,32 @@ class SessionDB:
                     (now.isoformat(), room_id),
                 )
             await db.commit()
+
+    async def update_webhook(
+        self,
+        room_id: str,
+        webhook_url: str,
+        webhook_secret: str,
+        quiet_mode: bool = False,
+        ttl_seconds: Optional[int] = None,
+    ) -> None:
+        """Update webhook details for a session (used on re-handoff)."""
+        now = datetime.utcnow()
+        expires_at = None
+        if ttl_seconds:
+            expires_at = (now + timedelta(seconds=ttl_seconds)).isoformat()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """UPDATE sessions 
+                   SET agent_shell_webhook_url = ?, agent_shell_secret = ?,
+                       quiet_mode = ?, ttl_seconds = ?, handoff_expires_at = ?,
+                       last_message_at = ?
+                   WHERE room_id = ?""",
+                (webhook_url, webhook_secret, quiet_mode, ttl_seconds,
+                 expires_at, now.isoformat(), room_id),
+            )
+            await db.commit()
+        logger.info(f"Updated webhook details for room {room_id}")
 
     async def get_owner(self, room_id: str) -> str:
         """Get current owner of a session."""

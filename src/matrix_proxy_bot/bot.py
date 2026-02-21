@@ -13,8 +13,8 @@ import markdown
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import uvicorn
-from nio import AsyncClient, RoomMessageText, RoomMessageUnknown, SyncResponse, RoomCreateResponse, RoomVisibility, MatrixRoom
-from nio.responses import LoginResponse, LoginError, KeysQueryError
+from nio import AsyncClient, RoomMessageText, RoomMessageUnknown, RoomCreateResponse, RoomVisibility, MatrixRoom
+from nio.responses import LoginError, KeysQueryError
 from nio.events.room_events import UnknownEvent
 
 # E2E encryption (optional)
@@ -24,7 +24,6 @@ try:
         KeyVerificationAccept,
         KeyVerificationKey,
         KeyVerificationMac,
-        KeyVerificationCancel,
         MegolmEvent,
         ToDeviceError,
         ToDeviceEvent,
@@ -214,8 +213,15 @@ class ProxyBot:
                         except Exception as invite_err:
                             logger.error(f"Reinvite failed for {user_id}: {invite_err}")
                     
-                    # Update owner back to matrix (was emacs, now handing off again)
+                    # Update owner and refresh webhook details (may have changed)
                     await self.db.set_owner(room_id, "matrix")
+                    await self.db.update_webhook(
+                        room_id,
+                        webhook_url=req.webhook_url,
+                        webhook_secret=req.webhook_secret,
+                        quiet_mode=req.quiet_mode,
+                        ttl_seconds=req.ttl_seconds,
+                    )
                 else:
                     # Create new room — name is agent-{hostname}, with .N suffix if needed
                     session_hash = hashlib.sha256(req.session_id.encode()).hexdigest()[:8]
@@ -409,7 +415,7 @@ class ProxyBot:
             token = auth_header[7:]
             is_valid = token == self.config.webhook_secret
             if not is_valid:
-                logger.debug(f"Auth validation failed: token={token[:20]}..., expected={self.config.webhook_secret[:20]}...")
+                logger.debug("Auth validation failed: token mismatch")
             return is_valid
         logger.debug(f"Invalid auth format: {auth_header[:30]}...")
         return False
@@ -707,6 +713,7 @@ Last message: {session['last_message_at']}"""
         timeout = aiohttp.ClientTimeout(total=5)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=payload, headers=headers) as resp:
+                resp.raise_for_status()
                 return await resp.json()
 
     async def send_to_room(self, room_id: str, message: str, formatted_body: str = None, format_type: str = None):

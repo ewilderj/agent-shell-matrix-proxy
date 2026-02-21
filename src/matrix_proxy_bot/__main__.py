@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
 
 # Force unbuffered output
@@ -31,6 +30,11 @@ if env_path.exists():
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+# Apply LOG_LEVEL from config to root logger (basicConfig above sets DEBUG
+# as a default; this override picks up the .env value once loaded).
+_log_level = os.getenv("LOG_LEVEL", "DEBUG").upper()
+logging.getLogger().setLevel(getattr(logging, _log_level, logging.DEBUG))
 
 # Suppress noisy debug loggers
 logging.getLogger("nio.responses").setLevel(logging.WARNING)

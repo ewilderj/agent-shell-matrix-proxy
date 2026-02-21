@@ -36,3 +36,4 @@ venv.bak/
 htmlcov/
 /.venv
 /.ruff_cache
+*.backup
