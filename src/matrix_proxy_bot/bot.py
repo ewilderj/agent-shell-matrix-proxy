@@ -724,19 +724,8 @@ Last message: {session['last_message_at']}"""
                 logger.info("Uploading initial device keys...")
                 await self.client.keys_upload()
 
-            # Bootstrap or load cross-signing keys
-            seeds_path = self.store_dir / "cross_signing_seeds.json"
-            if seeds_path.exists():
-                self.cross_signing_keys = load_signing_keys(str(self.store_dir))
-                logger.info("Loaded existing cross-signing keys")
-            elif self.config.password:
-                logger.info("Bootstrapping cross-signing keys...")
-                self.cross_signing_keys = await bootstrap_cross_signing(
-                    self.client, str(self.store_dir), self.config.password
-                )
-                logger.info("Cross-signing keys bootstrapped")
-            else:
-                logger.warning("No password configured — skipping cross-signing bootstrap")
+            # Don't bootstrap cross-signing — Element owns the cross-signing
+            # identity. The bot is just a device that gets verified by Element.
 
             logger.info("E2E encryption ready")
         except Exception as e:
@@ -842,11 +831,6 @@ Last message: {session['last_message_at']}"""
                 resp = await self.client.to_device(done_msg)
                 if isinstance(resp, ToDeviceError):
                     logger.warning(f"verification done failed: {resp}")
-                # Cross-sign the user's master key
-                if self.cross_signing_keys:
-                    await sign_user_master_key(
-                        self.client, self.cross_signing_keys, event.sender
-                    )
 
     async def _handle_verification_request(self, sender: str, req: dict) -> None:
         """Handle incoming verification request — send ready response."""
