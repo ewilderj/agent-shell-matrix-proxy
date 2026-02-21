@@ -179,6 +179,11 @@ class ProxyBot:
         self.pending_verification_requests: dict[str, tuple[str, str]] = {}
         self.in_room_verifications: dict[str, tuple[str, str, str]] = {}
 
+        # Per-room send queue for rate limiting
+        self._send_queues: dict[str, asyncio.Queue] = {}
+        self._send_tasks: dict[str, asyncio.Task] = {}
+        self._send_interval = 0.5  # seconds between sends per room
+
         # FastAPI app for webhook server
         self.app = FastAPI(title="matrix-proxy-bot")
         self._setup_routes()
@@ -717,7 +722,47 @@ Last message: {session['last_message_at']}"""
                 return await resp.json()
 
     async def send_to_room(self, room_id: str, message: str, formatted_body: str = None, format_type: str = None):
-        """Send message to Matrix room with optional HTML formatting.
+        """Queue a message for rate-limited delivery to a Matrix room.
+        
+        Messages are coalesced if they arrive faster than the send interval.
+        """
+        if room_id not in self._send_queues:
+            self._send_queues[room_id] = asyncio.Queue()
+        await self._send_queues[room_id].put((message, formatted_body, format_type))
+        # Start drain task if not running
+        if room_id not in self._send_tasks or self._send_tasks[room_id].done():
+            self._send_tasks[room_id] = asyncio.create_task(
+                self._drain_send_queue(room_id))
+
+    async def _drain_send_queue(self, room_id: str):
+        """Drain the send queue for a room, coalescing rapid messages."""
+        queue = self._send_queues[room_id]
+        while True:
+            # Get first message (block until available)
+            msg, fmt_body, fmt_type = await queue.get()
+
+            # Brief pause to let rapid follow-ups accumulate
+            await asyncio.sleep(0.1)
+
+            # Drain any queued messages and coalesce
+            while not queue.empty():
+                next_msg, next_fmt, next_fmt_type = queue.get_nowait()
+                msg = msg + "\n" + next_msg
+                # If any message has formatting, combine as plain text
+                if next_fmt:
+                    fmt_body = None
+                    fmt_type = None
+
+            await self._send_to_room_now(room_id, msg, fmt_body, fmt_type)
+
+            # Rate limit: wait before sending next
+            await asyncio.sleep(self._send_interval)
+
+            if queue.empty():
+                break
+
+    async def _send_to_room_now(self, room_id: str, message: str, formatted_body: str = None, format_type: str = None):
+        """Send message to Matrix room immediately.
         
         If formatted_body and format_type are provided, sends as formatted message.
         Otherwise sends as plain text.
