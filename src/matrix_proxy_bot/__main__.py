@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 # Suppress noisy debug loggers
 logging.getLogger("nio.responses").setLevel(logging.WARNING)
 logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+logging.getLogger("peewee").setLevel(logging.WARNING)
+logging.getLogger("nio.crypto.log").setLevel(logging.WARNING)
 
 
 async def main():
