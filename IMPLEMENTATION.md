@@ -111,6 +111,111 @@ matrix-proxy-bot/
 3. **Monitor concurrent sessions** (stress test)
 4. **Create agent-shell-matrix-remote.el** (Elisp handoff client for Emacs)
 
+## E2E Encryption & Device Verification
+
+This was extremely hard-won. Here's what you need to know.
+
+### Architecture: The Bot Owns Cross-Signing
+
+The bot bootstraps its own cross-signing identity (master, self-signing,
+user-signing keys) on first run. It is the **cross-signing authority** for
+`@copilot`. Element logins are verified BY the bot, not the other way around.
+
+This is the same approach used by casa. Without this, Element will complete
+SAS verification at the protocol level but show the device as "unverified"
+because there's no trust chain.
+
+### Three Things That Must All Work Together
+
+**1. Cross-signing bootstrap (bot.py `_setup_encryption`, cross_signing.py)**
+
+On first run (no `cross_signing_seeds.json`):
+- Generates master, self-signing, user-signing key seeds
+- Uploads them to the server with UIA password auth (two-step: first request
+  returns 401 with session, second includes `m.login.password`)
+- Signs own device with self-signing key (`sign_own_device`)
+- Signs master key with device key (`sign_master_key_with_device`)
+- Saves seeds to `cross_signing_seeds.json`
+
+On restart (seeds exist):
+- Loads seeds from file
+- Re-signs master key with device key (idempotent, needs `client_session`
+  which only exists after first `sync()`)
+
+After SAS verification succeeds:
+- Injects master key into MAC message (`_inject_master_key_mac`) — this
+  tells the other side about our master key so they can verify it
+- Cross-signs the other user's master key (`sign_user_master_key`)
+
+**2. MegolmEvent handler (bot.py `_on_megolm`)**
+
+In encrypted rooms, messages arrive as Megolm-encrypted blobs. If the bot
+doesn't have the session key (e.g., new device, new room), nio delivers a
+`MegolmEvent` instead of the decrypted message. Without a handler that calls
+`client.request_room_key(event)`, verification requests are silently dropped.
+
+**3. Late-registration from start event (bot.py `_on_room_verification`)**
+
+The in-room verification flow is:
+```
+request (m.room.message, msgtype=m.key.verification.request)
+  → ready → start → accept → key → key → mac → mac → done
+```
+
+The initial `request` arrives as `RoomMessageUnknown`. But it can be missed:
+- It may arrive encrypted before room keys are shared
+- It may arrive during a sync before callbacks are registered
+- nio may deliver it as a type the callback doesn't match
+
+The `start` event includes `from_device` and `m.relates_to.event_id` — enough
+to register the verification and proceed. The bot now falls back to registering
+from `start` if the `request` was never seen.
+
+### Key Gotchas (Pain Points)
+
+- **Cross-signing seeds MUST match server state.** If another device (e.g.,
+  Element) bootstraps cross-signing, it overwrites the server's keys. The bot's
+  saved seeds become stale and ALL signature operations fail with
+  `M_INVALID_SIGNATURE`. Fix: delete `cross_signing_seeds.json` + `nio_store/`
+  and let the bot re-bootstrap.
+
+- **`client_session` timing.** The aiohttp session (`client.client_session`)
+  is created during the first `sync()`, not at client construction. Any HTTP
+  calls (like `sign_master_key_with_device`) must happen AFTER the initial sync.
+
+- **`restore_login()` is required.** Just setting `client.access_token` is not
+  enough — `restore_login(user_id, device_id, access_token)` triggers loading
+  of the olm machine for E2E.
+
+- **Synapse UIA for cross-signing.** The server requires User-Interactive Auth
+  to upload cross-signing keys. First POST returns 401 with a session token;
+  second POST includes `m.login.password` auth with that session. Requires
+  `MATRIX_BOT_PASSWORD` in `.env`.
+
+- **In-room vs to-device verification.** In-room verification events use
+  `m.relates_to` with `rel_type: m.reference` pointing to the request event ID.
+  To-device uses `transaction_id` directly. The SAS object uses
+  `transaction_id` for both — set it to the request event ID for in-room.
+
+- **`ignore_unverified_devices=True`** must be passed to every `room_send()`
+  call, otherwise nio refuses to encrypt messages to unverified devices.
+
+### Nuclear Reset Procedure
+
+If verification gets into a bad state:
+1. Stop the bot
+2. Delete `~/.agent-shell-matrix-proxy/nio_store/` and `cross_signing_seeds.json`
+3. Delete the bot's device from the server:
+   ```
+   curl -X POST -H "Authorization: Bearer $TOKEN" \
+     -d '{"devices":["DEVICE_ID"]}' \
+     http://localhost:8008/_matrix/client/v3/delete_devices
+   # (requires UIA — two-step with password)
+   ```
+4. Log in fresh to get a new device_id and access_token
+5. Update `.env` with new credentials
+6. Start the bot — it will bootstrap fresh cross-signing
+
 ## Known Limitations
 
 - E2E encryption requires libolm build tools (optional, graceful fallback)
