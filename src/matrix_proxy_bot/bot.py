@@ -982,8 +982,17 @@ Last message: {session['last_message_at']}"""
         if relates_to.get("rel_type") != "m.reference":
             return
         ref_event_id = relates_to.get("event_id")
-        if not ref_event_id or ref_event_id not in self.in_room_verifications:
+        if not ref_event_id:
             return
+
+        # If we haven't seen the request yet, register it now from the start event
+        if ref_event_id not in self.in_room_verifications:
+            from_device = content.get("from_device")
+            if from_device and event_type == "m.key.verification.start":
+                logger.info("Late-registering in-room verification from start event %s", ref_event_id)
+                self.in_room_verifications[ref_event_id] = (room.room_id, event.sender, from_device)
+            else:
+                return
 
         room_id, sender, from_device = self.in_room_verifications[ref_event_id]
         if event.sender != sender:
