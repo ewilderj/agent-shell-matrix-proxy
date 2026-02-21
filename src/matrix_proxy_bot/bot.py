@@ -72,7 +72,7 @@ class HandoffRequest(BaseModel):
     webhook_secret: str
     message: Optional[str] = None
     quiet_mode: bool = False
-    ttl_seconds: Optional[int] = None
+    ttl_seconds: Optional[int] = 14400  # Default 4 hours
 
 
 class HandoffResponse(BaseModel):
