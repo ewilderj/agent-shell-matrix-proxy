@@ -25,6 +25,7 @@ try:
         KeyVerificationKey,
         KeyVerificationMac,
         KeyVerificationCancel,
+        MegolmEvent,
         ToDeviceError,
         ToDeviceEvent,
         ToDeviceMessage,
@@ -460,6 +461,7 @@ class ProxyBot:
         if HAS_E2E:
             self.client.add_to_device_callback(self._on_to_device_verification, ToDeviceEvent)
             self.client.add_event_callback(self._on_room_verification, UnknownEvent)
+            self.client.add_event_callback(self._on_megolm, MegolmEvent)
 
         # Start webhook server (runs in background)
         logger.info(
@@ -742,6 +744,29 @@ Last message: {session['last_message_at']}"""
             logger.info("E2E encryption ready")
         except Exception as e:
             logger.error(f"E2E setup error: {e}")
+
+    async def _on_megolm(self, room: MatrixRoom, event: "MegolmEvent"):
+        """Handle undecryptable messages by requesting the missing room key."""
+        if event.sender == self.client.user_id:
+            return
+        logger.warning(
+            "Unable to decrypt message from %s in %s (session %s). Requesting key.",
+            event.sender, room.display_name, event.session_id,
+        )
+        try:
+            await self._query_user_keys(event.sender)
+        except Exception:
+            pass
+        try:
+            resp = await self.client.request_room_key(event)
+            if hasattr(resp, "message"):
+                logger.warning("Room key request failed: %s", resp.message)
+            else:
+                logger.info("Room key requested for session %s", event.session_id)
+        except LocalProtocolError:
+            logger.debug("Room key already requested for session %s", event.session_id)
+        except Exception as exc:
+            logger.warning("Room key request error: %s", exc)
 
     async def _on_to_device_verification(self, event: "ToDeviceEvent"):
         """Handle SAS verification for E2E encryption.
