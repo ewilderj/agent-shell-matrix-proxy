@@ -724,8 +724,20 @@ Last message: {session['last_message_at']}"""
                 logger.info("Uploading initial device keys...")
                 await self.client.keys_upload()
 
-            # Don't bootstrap cross-signing — Element owns the cross-signing
-            # identity. The bot is just a device that gets verified by Element.
+            # Bootstrap or load cross-signing keys
+            seeds_path = self.store_dir / "cross_signing_seeds.json"
+            if seeds_path.exists():
+                self.cross_signing_keys = load_signing_keys(str(self.store_dir))
+                logger.info("Loaded existing cross-signing keys")
+                await sign_master_key_with_device(self.client, self.cross_signing_keys)
+            elif self.config.password:
+                logger.info("Bootstrapping cross-signing keys...")
+                self.cross_signing_keys = await bootstrap_cross_signing(
+                    self.client, str(self.store_dir), self.config.password
+                )
+                logger.info("Cross-signing keys bootstrapped")
+            else:
+                logger.warning("No password configured — skipping cross-signing bootstrap")
 
             logger.info("E2E encryption ready")
         except Exception as e:
@@ -800,10 +812,9 @@ Last message: {session['last_message_at']}"""
                 mac_msg = sas.get_mac()
 
                 if self.cross_signing_keys and "master" in self.cross_signing_keys:
-                    pass  # Skip master key MAC injection for now
-                    # _inject_master_key_mac(
-                    #     sas, mac_msg.content, self.cross_signing_keys["master"], tx_id
-                    # )
+                    _inject_master_key_mac(
+                        sas, mac_msg.content, self.cross_signing_keys["master"], tx_id
+                    )
 
                 resp = await self.client.to_device(mac_msg)
                 if isinstance(resp, ToDeviceError):
@@ -831,6 +842,11 @@ Last message: {session['last_message_at']}"""
                 resp = await self.client.to_device(done_msg)
                 if isinstance(resp, ToDeviceError):
                     logger.warning(f"verification done failed: {resp}")
+                # Cross-sign the other side's master key
+                if self.cross_signing_keys:
+                    await sign_user_master_key(
+                        self.client, self.cross_signing_keys, event.sender
+                    )
 
     async def _handle_verification_request(self, sender: str, req: dict) -> None:
         """Handle incoming verification request — send ready response."""
@@ -1080,11 +1096,10 @@ Last message: {session['last_message_at']}"""
         logger.info("MAC content before inject: keys=%s mac_keys=%s", 
                      mac_content.get("keys", "?"), list(mac_content.get("mac", {}).keys()))
 
-        # TODO: re-enable master key MAC injection once basic verification works
-        # if self.cross_signing_keys and "master" in self.cross_signing_keys:
-        #     _inject_master_key_mac(
-        #         sas, mac_content, self.cross_signing_keys["master"], ref_event_id
-        #     )
+        if self.cross_signing_keys and "master" in self.cross_signing_keys:
+            _inject_master_key_mac(
+                sas, mac_content, self.cross_signing_keys["master"], ref_event_id
+            )
 
         logger.info("Sending MAC to room %s ref %s", room_id, ref_event_id)
 
