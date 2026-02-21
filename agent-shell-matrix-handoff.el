@@ -24,6 +24,12 @@
 (require 'url)
 (require 'agent-shell)
 
+(declare-function acp-send-request "acp")
+(declare-function acp-make-session-set-mode-request "acp")
+(declare-function acp-make-session-set-model-request "acp")
+(declare-function agent-shell--state "agent-shell")
+(declare-function agent-shell--get-available-modes "agent-shell")
+
 (defvar agent-shell-matrix-handoff--state nil
   "State during Matrix handoff session.
 Contains: ((room_id . ID) (session_id . ID) (shell_buffer . BUFFER))")
@@ -137,15 +143,28 @@ Returns parsed JSON response."
 (defun agent-shell-matrix-webhook--process-message (payload)
   "Process incoming webhook message from matrix-proxy-bot."
   (let ((action (alist-get 'action payload))
+        (value (alist-get 'value payload))
         (msg (alist-get 'message payload))
         (shell-buffer (and agent-shell-matrix-handoff--state
                           (cdr (assoc "shell_buffer" agent-shell-matrix-handoff--state)))))
     
     (cond
-     ;; Command: handoff_end - notify via *Messages*, not the buffer
+     ;; Command: handoff_end
      ((and action (string= action "handoff_end"))
       (setq agent-shell-matrix-handoff--state nil)
       (message "✓ Session returned to Emacs"))
+
+     ;; Command: set_mode
+     ((and action (string= action "set_mode") value shell-buffer)
+      (with-current-buffer shell-buffer
+        (agent-shell-matrix-handoff--set-mode value))
+      (message "✓ Mode → %s" value))
+
+     ;; Command: set_model
+     ((and action (string= action "set_model") value shell-buffer)
+      (with-current-buffer shell-buffer
+        (agent-shell-matrix-handoff--set-model value))
+      (message "✓ Model → %s" value))
      
      ;; Regular message from user in Matrix - submit to agent via shell-maker
      (msg
@@ -156,6 +175,72 @@ Returns parsed JSON response."
             (setq agent-shell-matrix-handoff--typing t)))
         (with-current-buffer shell-buffer
           (shell-maker-submit :input msg)))))))
+
+(defun agent-shell-matrix-handoff--set-mode (mode-name)
+  "Set agent-shell session mode to MODE-NAME programmatically."
+  (let* ((state (agent-shell--state))
+         (modes (agent-shell--get-available-modes state))
+         (mode (seq-find (lambda (m)
+                           (string-equal-ignore-case (map-elt m :name) mode-name))
+                         modes))
+         (mode-id (and mode (map-elt mode :id))))
+    (unless mode-id
+      (error "Unknown mode: %s" mode-name))
+    (acp-send-request
+     :client (map-elt state :client)
+     :request (acp-make-session-set-mode-request
+               :session-id (map-nested-elt state '(:session :id))
+               :mode-id mode-id)
+     :buffer (current-buffer)
+     :on-success (lambda (_response)
+                   (let ((session (map-elt (agent-shell--state) :session)))
+                     (map-put! session :mode-id mode-id)
+                     (map-put! (agent-shell--state) :session session))))))
+
+(defun agent-shell-matrix-handoff--set-model (model-name)
+  "Set agent-shell session model to MODEL-NAME programmatically."
+  (let* ((state (agent-shell--state))
+         (models (map-nested-elt state '(:session :models)))
+         (model (seq-find (lambda (m)
+                            (or (string-equal-ignore-case (map-elt m :name) model-name)
+                                (string-equal-ignore-case (map-elt m :model-id) model-name)))
+                          models))
+         (model-id (and model (map-elt model :model-id))))
+    (unless model-id
+      (error "Unknown model: %s" model-name))
+    (acp-send-request
+     :client (map-elt state :client)
+     :request (acp-make-session-set-model-request
+               :session-id (map-nested-elt state '(:session :id))
+               :model-id model-id)
+     :on-success (lambda (_response)
+                   (let ((session (map-elt (agent-shell--state) :session)))
+                     (map-put! session :model-id model-id)
+                     (map-put! (agent-shell--state) :session session))))))
+
+(defun agent-shell-matrix-handoff--get-capabilities ()
+  "Return an alist of available modes/models and current selections."
+  (let* ((state (agent-shell--state))
+         (modes (agent-shell--get-available-modes state))
+         (models (map-nested-elt state '(:session :models)))
+         (current-mode-id (map-nested-elt state '(:session :mode-id)))
+         (current-model-id (map-nested-elt state '(:session :model-id)))
+         result)
+    (when modes
+      (push (cons "available_modes"
+                   (mapcar (lambda (m) (map-elt m :name)) modes))
+            result)
+      (when current-mode-id
+        (let ((mode (seq-find (lambda (m) (string= (map-elt m :id) current-mode-id)) modes)))
+          (when mode
+            (push (cons "current_mode" (map-elt mode :name)) result)))))
+    (when models
+      (push (cons "available_models"
+                   (mapcar (lambda (m) (map-elt m :model-id)) models))
+            result)
+      (when current-model-id
+        (push (cons "current_model" current-model-id) result)))
+    result))
 
 (defun agent-shell-matrix-handoff--relay-async (room-id session-id text)
   "Asynchronously relay TEXT to Matrix room via bot webhook.
@@ -331,6 +416,8 @@ Use M-x agent-shell-matrix-return to bring the session back."
                                                              agent-shell-matrix-webhook-host
                                                              agent-shell-matrix-webhook-port)))
                              (cons "webhook_secret" "test-secret")))
+         (capabilities (agent-shell-matrix-handoff--get-capabilities))
+         (handoff-data (append handoff-data capabilities))
          (handoff-data (if (and context (not (string-empty-p context)))
                           (append handoff-data (list (cons "message" context)))
                           handoff-data))

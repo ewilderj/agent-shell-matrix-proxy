@@ -72,6 +72,10 @@ class HandoffRequest(BaseModel):
     message: Optional[str] = None
     quiet_mode: bool = False
     ttl_seconds: Optional[int] = 14400  # Default 4 hours
+    available_modes: Optional[list[str]] = None
+    current_mode: Optional[str] = None
+    available_models: Optional[list[str]] = None
+    current_model: Optional[str] = None
 
 
 class HandoffResponse(BaseModel):
@@ -226,6 +230,10 @@ class ProxyBot:
                         webhook_secret=req.webhook_secret,
                         quiet_mode=req.quiet_mode,
                         ttl_seconds=req.ttl_seconds,
+                        available_modes=req.available_modes,
+                        current_mode=req.current_mode,
+                        available_models=req.available_models,
+                        current_model=req.current_model,
                     )
                 else:
                     # Create new room — name is agent-{hostname}, with .N suffix if needed
@@ -272,7 +280,11 @@ class ProxyBot:
                         webhook_secret=req.webhook_secret,
                         quiet_mode=req.quiet_mode,
                         ttl_seconds=req.ttl_seconds,
-                        initiated_by=self.config.user_id
+                        initiated_by=self.config.user_id,
+                        available_modes=req.available_modes,
+                        current_mode=req.current_mode,
+                        available_models=req.available_models,
+                        current_model=req.current_model,
                     )
                 
                 # Post initial message
@@ -598,9 +610,13 @@ class ProxyBot:
             logger.exception(f"Error handling room message in {room_id}: {e}")
 
     async def _handle_command(self, room_id: str, parsed: dict, sender: str):
-        """Execute ! command."""
+        """Execute a command (built-in or dynamic mode/model)."""
         try:
             if parsed.get("error"):
+                # Check if it's a dynamic command before reporting error
+                session = await self.db.get_session(room_id)
+                if session and await self._try_dynamic_command(room_id, session, parsed):
+                    return
                 await self.send_to_room(room_id, f"❌ {parsed['error']}")
                 return
 
@@ -616,14 +632,82 @@ class ProxyBot:
                 await self._show_status(room_id)
             
             elif action == "help":
-                help_text = """Available commands:
-!return  — Hand session back to Emacs
-!close   — Archive session
-!status  — Show session status
-!help    — Show this help"""
-                await self.send_to_room(room_id, help_text)
+                await self._show_help(room_id)
         except Exception as e:
             logger.error(f"Command handler error: {e}", exc_info=True)
+
+    async def _try_dynamic_command(self, room_id: str, session: dict, parsed: dict) -> bool:
+        """Try to handle a dynamic mode or model command. Returns True if handled."""
+        command = parsed.get("command", "")
+        args = parsed.get("args", [])
+
+        # Mode commands: !plan, !agent, !autopilot, etc.
+        modes_json = session.get("available_modes")
+        if modes_json:
+            modes = json.loads(modes_json)
+            mode_map = {m.lower(): m for m in modes}
+            cmd_name = command.lstrip("!")
+            if cmd_name in mode_map:
+                await self._set_remote_mode(room_id, session, mode_map[cmd_name])
+                return True
+
+        # Model command: !model <name>
+        if command == "!model":
+            models_json = session.get("available_models")
+            if not models_json:
+                await self.send_to_room(room_id, "❌ No models available")
+                return True
+            models = json.loads(models_json)
+            if not args:
+                current = session.get("current_model") or "unknown"
+                model_list = ", ".join(f"`{m}`" for m in models)
+                html = (
+                    f"Current model: <b>{current}</b><br>"
+                    f"Available: {', '.join(f'<code>{m}</code>' for m in models)}"
+                )
+                await self.send_to_room(
+                    room_id,
+                    f"Current model: {current}\nAvailable: {model_list}",
+                    html, "org.matrix.custom.html")
+                return True
+            target = args[0]
+            # Allow partial match
+            match = next((m for m in models if m.startswith(target) or target in m), None)
+            if match:
+                await self._set_remote_model(room_id, session, match)
+            else:
+                await self.send_to_room(room_id, f"❌ Unknown model: {target}")
+            return True
+
+        return False
+
+    async def _set_remote_mode(self, room_id: str, session: dict, mode: str):
+        """Send set_mode action to Emacs and confirm."""
+        try:
+            await self._call_webhook(
+                session["agent_shell_webhook_url"],
+                session["agent_shell_secret"],
+                {"action": "set_mode", "value": mode}
+            )
+            await self.db.update_current(room_id, mode=mode)
+            await self.send_to_room(room_id, f"✓ Mode → {mode}")
+        except Exception as e:
+            logger.error(f"Failed to set mode: {e}")
+            await self.send_to_room(room_id, f"❌ Failed to set mode: {str(e)[:100]}")
+
+    async def _set_remote_model(self, room_id: str, session: dict, model: str):
+        """Send set_model action to Emacs and confirm."""
+        try:
+            await self._call_webhook(
+                session["agent_shell_webhook_url"],
+                session["agent_shell_secret"],
+                {"action": "set_model", "value": model}
+            )
+            await self.db.update_current(room_id, model=model)
+            await self.send_to_room(room_id, f"✓ Model → {model}")
+        except Exception as e:
+            logger.error(f"Failed to set model: {e}")
+            await self.send_to_room(room_id, f"❌ Failed to set model: {str(e)[:100]}")
 
     async def _return_to_emacs(self, room_id: str):
         """Return session to Emacs."""
@@ -654,6 +738,49 @@ class ProxyBot:
         await self.db.set_owner(room_id, "emacs")
         await self.send_to_room(room_id, "🔒 Session closed and archived")
 
+    async def _show_help(self, room_id: str):
+        """Show available commands including dynamic ones."""
+        session = await self.db.get_session(room_id)
+
+        lines = [
+            "<b>Commands</b>",
+            "<code>!return</code> — Hand session back to Emacs",
+            "<code>!close</code> — Archive session",
+            "<code>!status</code> — Show session status",
+            "<code>!help</code> — Show this help",
+        ]
+        plain = [
+            "Commands",
+            "!return  — Hand session back to Emacs",
+            "!close   — Archive session",
+            "!status  — Show session status",
+            "!help    — Show this help",
+        ]
+
+        if session:
+            modes_json = session.get("available_modes")
+            if modes_json:
+                modes = json.loads(modes_json)
+                current = session.get("current_mode") or ""
+                lines.append("")
+                lines.append("<b>Modes</b>")
+                plain.append("")
+                plain.append("Modes")
+                for m in modes:
+                    marker = " ●" if m == current else ""
+                    lines.append(f"<code>!{m.lower()}</code> — Switch to {m}{marker}")
+                    plain.append(f"!{m.lower()}  — Switch to {m}{marker}")
+
+            models_json = session.get("available_models")
+            if models_json:
+                lines.append("")
+                lines.append("<code>!model &lt;name&gt;</code> — Switch model")
+                plain.append("")
+                plain.append("!model <name> — Switch model")
+
+        html = "<br>".join(lines)
+        await self.send_to_room(room_id, "\n".join(plain), html, "org.matrix.custom.html")
+
     async def _show_status(self, room_id: str):
         """Show session status."""
         session = await self.db.get_session(room_id)
@@ -668,11 +795,25 @@ class ProxyBot:
             expires_line = f"\nExpires: {time_left:.0f}m"
             expires_html = f"<br>Expires: {time_left:.0f}m"
 
+        mode_line = ""
+        mode_html = ""
+        if session.get("current_mode"):
+            mode_line = f"\nMode: {session['current_mode']}"
+            mode_html = f"<br>Mode: {session['current_mode']}"
+
+        model_line = ""
+        model_html = ""
+        if session.get("current_model"):
+            model_line = f"\nModel: {session['current_model']}"
+            model_html = f"<br>Model: <code>{session['current_model']}</code>"
+
         status_text = (
             f"Session Status\n"
             f"Hostname: {session['hostname']}\n"
             f"Session: {session['session_hash']}\n"
-            f"Owner: {session['owner']}\n"
+            f"Owner: {session['owner']}"
+            f"{mode_line}"
+            f"{model_line}\n"
             f"Started: {session['initiated_at']}\n"
             f"Last message: {session['last_message_at']}"
             f"{expires_line}"
@@ -681,7 +822,9 @@ class ProxyBot:
             f"<b>Session Status</b><br>"
             f"Hostname: {session['hostname']}<br>"
             f"Session: <code>{session['session_hash']}</code><br>"
-            f"Owner: {session['owner']}<br>"
+            f"Owner: {session['owner']}"
+            f"{mode_html}"
+            f"{model_html}<br>"
             f"Started: {session['initiated_at']}<br>"
             f"Last message: {session['last_message_at']}"
             f"{expires_html}"

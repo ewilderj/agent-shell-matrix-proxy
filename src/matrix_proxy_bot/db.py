@@ -1,6 +1,7 @@
 """Session database and tracking."""
 
 import aiosqlite
+import json
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -35,17 +36,28 @@ class SessionDB:
                     agent_shell_secret TEXT,
                     quiet_mode BOOLEAN DEFAULT 0,
                     ttl_seconds INTEGER,
-                    handoff_expires_at TEXT
+                    handoff_expires_at TEXT,
+                    available_modes TEXT,
+                    current_mode TEXT,
+                    available_models TEXT,
+                    current_model TEXT
                 )
                 """
             )
             await db.commit()
-            # Migrate: add ttl_seconds column if missing (existing databases)
-            try:
-                await db.execute("ALTER TABLE sessions ADD COLUMN ttl_seconds INTEGER")
-                await db.commit()
-            except Exception:
-                pass  # column already exists
+            # Migrate: add columns if missing (existing databases)
+            for col, coltype in [
+                ("ttl_seconds", "INTEGER"),
+                ("available_modes", "TEXT"),
+                ("current_mode", "TEXT"),
+                ("available_models", "TEXT"),
+                ("current_model", "TEXT"),
+            ]:
+                try:
+                    await db.execute(f"ALTER TABLE sessions ADD COLUMN {col} {coltype}")
+                    await db.commit()
+                except Exception:
+                    pass  # column already exists
         self.initialized = True
         logger.info(f"Initialized session DB at {self.db_path}")
 
@@ -92,6 +104,10 @@ class SessionDB:
         quiet_mode: bool = False,
         ttl_seconds: Optional[int] = None,
         initiated_by: Optional[str] = None,
+        available_modes: Optional[list[str]] = None,
+        current_mode: Optional[str] = None,
+        available_models: Optional[list[str]] = None,
+        current_model: Optional[str] = None,
     ) -> None:
         """Create new handoff session record."""
         now = datetime.utcnow().isoformat()
@@ -105,8 +121,9 @@ class SessionDB:
                 INSERT OR REPLACE INTO sessions 
                 (room_id, session_id, session_hash, hostname, owner, initiated_by, 
                  initiated_at, created_at, last_message_at, agent_shell_webhook_url, 
-                 agent_shell_secret, quiet_mode, ttl_seconds, handoff_expires_at)
-                VALUES (?, ?, ?, ?, 'matrix', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 agent_shell_secret, quiet_mode, ttl_seconds, handoff_expires_at,
+                 available_modes, current_mode, available_models, current_model)
+                VALUES (?, ?, ?, ?, 'matrix', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     room_id,
@@ -122,6 +139,10 @@ class SessionDB:
                     quiet_mode,
                     ttl_seconds,
                     expires_at,
+                    json.dumps(available_modes) if available_modes else None,
+                    current_mode,
+                    json.dumps(available_models) if available_models else None,
+                    current_model,
                 ),
             )
             await db.commit()
@@ -168,8 +189,12 @@ class SessionDB:
         webhook_secret: str,
         quiet_mode: bool = False,
         ttl_seconds: Optional[int] = None,
+        available_modes: Optional[list[str]] = None,
+        current_mode: Optional[str] = None,
+        available_models: Optional[list[str]] = None,
+        current_model: Optional[str] = None,
     ) -> None:
-        """Update webhook details for a session (used on re-handoff)."""
+        """Update webhook details and capabilities for a session."""
         now = datetime.utcnow()
         expires_at = None
         if ttl_seconds:
@@ -179,10 +204,17 @@ class SessionDB:
                 """UPDATE sessions 
                    SET agent_shell_webhook_url = ?, agent_shell_secret = ?,
                        quiet_mode = ?, ttl_seconds = ?, handoff_expires_at = ?,
-                       last_message_at = ?
+                       last_message_at = ?,
+                       available_modes = ?, current_mode = ?,
+                       available_models = ?, current_model = ?
                    WHERE room_id = ?""",
                 (webhook_url, webhook_secret, quiet_mode, ttl_seconds,
-                 expires_at, now.isoformat(), room_id),
+                 expires_at, now.isoformat(),
+                 json.dumps(available_modes) if available_modes else None,
+                 current_mode,
+                 json.dumps(available_models) if available_models else None,
+                 current_model,
+                 room_id),
             )
             await db.commit()
         logger.info(f"Updated webhook details for room {room_id}")
@@ -191,6 +223,21 @@ class SessionDB:
         """Get current owner of a session."""
         session = await self.get_session(room_id)
         return session.get("owner", "matrix") if session else "matrix"
+
+    async def update_current(self, room_id: str, mode: Optional[str] = None, model: Optional[str] = None) -> None:
+        """Update current mode and/or model for a session."""
+        async with aiosqlite.connect(self.db_path) as db:
+            if mode is not None:
+                await db.execute(
+                    "UPDATE sessions SET current_mode = ? WHERE room_id = ?",
+                    (mode, room_id),
+                )
+            if model is not None:
+                await db.execute(
+                    "UPDATE sessions SET current_model = ? WHERE room_id = ?",
+                    (model, room_id),
+                )
+            await db.commit()
 
     async def list_sessions(self) -> list[dict]:
         """List all active sessions."""
