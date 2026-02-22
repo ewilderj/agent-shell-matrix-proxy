@@ -24,11 +24,18 @@ tested. Your mileage may vary. Bug reports and patches welcome.
 * Architecture
 
 #+begin_example
-  Emacs (agent-shell)
-      ↕ HTTP webhooks
-  Matrix Proxy Bot (Python, matrix-nio)
-      ↕ Matrix protocol
-  Matrix Homeserver → Element (phone/web)
+  Emacs                        Matrix Proxy Bot             Matrix
+  +-------------------+        +--------------------+       +----------------+
+  | agent-shell       |--POST /handoff------------->|       |                |
+  |                   |--POST /webhook/message----->| Python | matrix-nio    |
+  |                   |        |                    |<======>| Homeserver     |
+  | webhook :9999     |<--POST /webhook callback----|       |                |
+  +-------------------+        +--------------------+       |  Element       |
+                               | Session mgmt       |       |  (mobile/web)  |
+                               | Message relay       |       +----------------+
+                               | Rate limiting        |
+                               | !commands            |
+                               +---------------------+
 #+end_example
 
 The bot runs as a Python service alongside your Matrix homeserver. Emacs
