@@ -5,6 +5,9 @@ A Matrix bot that relays [[https://github.com/xenodium/agent-shell][agent-shell]
 
 Start an agent-shell session in Emacs, hand it off to Matrix, continue from your phone, then bring it back to Emacs — seamlessly.
 
+*⚠️ Experimental:* This works for the author's setup but is not widely
+tested. Your mileage may vary. Bug reports and patches welcome.
+
 * Features
 
 - *Bidirectional relay* — Messages flow between Matrix rooms and agent-shell via webhooks
