@@ -38,3 +38,4 @@ htmlcov/
 /.ruff_cache
 *.backup
 *.elc
+.agent-shell/
