@@ -110,7 +110,7 @@ in your init:
 #+begin_src emacs-lisp
 (setq agent-shell-matrix-bot-url "http://127.0.0.1:8765")
 (setq agent-shell-matrix-webhook-port 9999)
-(setq agent-shell-matrix-webhook-host "0.0.0.0")
+(setq agent-shell-matrix-webhook-host "127.0.0.1")
 (setq agent-shell-matrix-webhook-secret "your-webhook-secret")
 #+end_src
 
