@@ -116,15 +116,18 @@ and collapsed sections."
 (defun agent-shell-matrix-handoff--call-bot (endpoint method data)
   "Call matrix-proxy-bot ENDPOINT with METHOD and DATA.
 Returns parsed JSON response."
-  (let* ((url-request-method method)
-         (url-request-extra-headers
-          (list (cons "Authorization" (format "Bearer %s" agent-shell-matrix-webhook-secret))
-                (cons "Content-Type" "application/json; charset=utf-8")))
-         (url-request-data (and data (encode-coding-string (json-encode data) 'utf-8))))
-    (with-current-buffer (url-retrieve-synchronously
-                          (concat agent-shell-matrix-bot-url endpoint))
+  (let* ((url (concat agent-shell-matrix-bot-url endpoint))
+         (json-data (and data (json-encode data)))
+         (args (list "-s" "-X" method
+                     "-H" (format "Authorization: Bearer %s"
+                                  agent-shell-matrix-webhook-secret)
+                     "-H" "Content-Type: application/json; charset=utf-8")))
+    (when json-data
+      (setq args (append args (list "-d" json-data))))
+    (setq args (append args (list url)))
+    (with-temp-buffer
+      (apply #'call-process "curl" nil t nil args)
       (goto-char (point-min))
-      (re-search-forward "^$")
       (condition-case err
           (json-parse-buffer :object-type 'alist :array-type 'list)
         (error
@@ -243,38 +246,31 @@ Returns parsed JSON response."
     result))
 
 (defun agent-shell-matrix-handoff--relay-async (room-id session-id text)
-  "Asynchronously relay TEXT to Matrix room via bot webhook.
-Uses url-retrieve to avoid blocking the process filter."
-  (let* ((url-request-method "POST")
-         (url-request-extra-headers
-          (list (cons "Authorization" (format "Bearer %s" agent-shell-matrix-webhook-secret))
-                (cons "Content-Type" "application/json; charset=utf-8")))
-         (url-request-data
-          (encode-coding-string
-           (json-encode (list (cons "room_id" room-id)
-                              (cons "session_id" session-id)
-                              (cons "response_text" text)))
-           'utf-8)))
-    (url-retrieve
-     (concat agent-shell-matrix-bot-url "/webhook/message")
-     (lambda (_status) (kill-buffer))
-     nil t)))
+  "Asynchronously relay TEXT to Matrix room via bot webhook."
+  (let* ((url (concat agent-shell-matrix-bot-url "/webhook/message"))
+         (json-data (json-encode (list (cons "room_id" room-id)
+                                       (cons "session_id" session-id)
+                                       (cons "response_text" text)))))
+    (start-process "matrix-relay" nil "curl" "-s"
+                   "-X" "POST"
+                   "-H" (format "Authorization: Bearer %s"
+                                agent-shell-matrix-webhook-secret)
+                   "-H" "Content-Type: application/json; charset=utf-8"
+                   "-d" json-data
+                   url)))
 
 (defun agent-shell-matrix-handoff--set-typing (room-id typing)
   "Asynchronously set typing indicator for ROOM-ID."
-  (let* ((url-request-method "POST")
-         (url-request-extra-headers
-          (list (cons "Authorization" (format "Bearer %s" agent-shell-matrix-webhook-secret))
-                (cons "Content-Type" "application/json; charset=utf-8")))
-         (url-request-data
-          (encode-coding-string
-           (json-encode (list (cons "room_id" room-id)
-                              (cons "typing" (if typing t :json-false))))
-           'utf-8)))
-    (url-retrieve
-     (concat agent-shell-matrix-bot-url "/typing")
-     (lambda (_status) (kill-buffer))
-     nil t)))
+  (let* ((url (concat agent-shell-matrix-bot-url "/typing"))
+         (json-data (json-encode (list (cons "room_id" room-id)
+                                       (cons "typing" (if typing t :json-false))))))
+    (start-process "matrix-typing" nil "curl" "-s"
+                   "-X" "POST"
+                   "-H" (format "Authorization: Bearer %s"
+                                agent-shell-matrix-webhook-secret)
+                   "-H" "Content-Type: application/json; charset=utf-8"
+                   "-d" json-data
+                   url)))
 
 (defun agent-shell-matrix-handoff--flush-output ()
   "Send accumulated agent output to Matrix room and stop typing."
