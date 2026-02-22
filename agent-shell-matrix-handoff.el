@@ -21,7 +21,9 @@
 ;;; Code:
 
 (require 'json)
-(require 'url)
+(require 'map)
+(require 'seq)
+(require 'ansi-color)
 (require 'agent-shell)
 
 (declare-function acp-send-request "acp")
@@ -34,25 +36,43 @@
   "State during Matrix handoff session.
 Contains: ((room_id . ID) (session_id . ID) (shell_buffer . BUFFER))")
 
-(defvar agent-shell-matrix-handoff-context-exchanges 2
+(defgroup agent-shell-matrix nil
+  "Matrix handoff for agent-shell."
+  :group 'agent-shell
+  :prefix "agent-shell-matrix-")
+
+(defcustom agent-shell-matrix-handoff-context-exchanges 2
   "Number of prompt/response exchanges to include in Matrix context.
-Set to 0 to disable context replay.")
+Set to 0 to disable context replay."
+  :type 'integer
+  :group 'agent-shell-matrix)
 
-(defvar agent-shell-matrix-webhook-secret "REDACTED-SET-VIA-CUSTOMIZE"
-  "Bearer token for authenticating with matrix-proxy-bot.")
+(defcustom agent-shell-matrix-webhook-secret nil
+  "Bearer token for authenticating with matrix-proxy-bot.
+Must be set before use."
+  :type '(choice (const :tag "Not set" nil) string)
+  :group 'agent-shell-matrix)
 
-(defvar agent-shell-matrix-bot-url "http://127.0.0.1:8765"
-  "URL of the matrix-proxy-bot server.")
+(defcustom agent-shell-matrix-bot-url "http://127.0.0.1:8765"
+  "URL of the matrix-proxy-bot server."
+  :type 'string
+  :group 'agent-shell-matrix)
 
-(defvar agent-shell-matrix-webhook-port 9999
-  "Port for the webhook server.")
+(defcustom agent-shell-matrix-webhook-port 9999
+  "Port for the webhook server."
+  :type 'integer
+  :group 'agent-shell-matrix)
 
-(defvar agent-shell-matrix-webhook-host "0.0.0.0"
-  "Host for the webhook server to bind to.")
+(defcustom agent-shell-matrix-webhook-host "0.0.0.0"
+  "Host for the webhook server to bind to."
+  :type 'string
+  :group 'agent-shell-matrix)
 
-(defvar agent-shell-matrix-webhook-url nil
+(defcustom agent-shell-matrix-webhook-url nil
   "URL the bot should use to reach the webhook server.
-If nil, defaults to http://<webhook-host>:<webhook-port>/webhook.")
+If nil, defaults to http://<webhook-host>:<webhook-port>/webhook."
+  :type '(choice (const :tag "Auto-detect" nil) string)
+  :group 'agent-shell-matrix)
 
 (defvar agent-shell-matrix-webhook-server-process nil
   "Server process listening for webhook calls.")
@@ -113,9 +133,15 @@ and collapsed sections."
                tail "\n\n")
             ""))))))
 
+(defun agent-shell-matrix-handoff--ensure-secret ()
+  "Error if `agent-shell-matrix-webhook-secret' is not configured."
+  (unless agent-shell-matrix-webhook-secret
+    (error "Set `agent-shell-matrix-webhook-secret' before using Matrix handoff")))
+
 (defun agent-shell-matrix-handoff--call-bot (endpoint method data)
   "Call matrix-proxy-bot ENDPOINT with METHOD and DATA.
 Returns parsed JSON response."
+  (agent-shell-matrix-handoff--ensure-secret)
   (let* ((url (concat agent-shell-matrix-bot-url endpoint))
          (json-data (and data (json-encode data)))
          (args (list "-s" "-X" method
@@ -135,13 +161,20 @@ Returns parsed JSON response."
          nil)))))
 
 (defun agent-shell-matrix-webhook--parse-http-body (buffer-str)
-  "Extract JSON body from HTTP request string BUFFER-STR."
-  (let ((parts (split-string buffer-str "\r\n\r\n")))
-    (when (> (length parts) 1)
-      (let ((body (nth 1 parts)))
-        (unless (string-empty-p (string-trim body))
-          (ignore-errors
-            (json-parse-string body :object-type 'alist :array-type 'list)))))))
+  "Extract JSON body from HTTP request string BUFFER-STR.
+Validates Content-Length before parsing to avoid truncated payloads."
+  (let ((header-end (string-match "\r\n\r\n" buffer-str)))
+    (when header-end
+      (let* ((headers (substring buffer-str 0 header-end))
+             (body (substring buffer-str (+ header-end 4)))
+             (content-length
+              (when (string-match "Content-Length: *\\([0-9]+\\)" headers)
+                (string-to-number (match-string 1 headers)))))
+        (when (or (null content-length)
+                  (>= (length body) content-length))
+          (unless (string-empty-p (string-trim body))
+            (ignore-errors
+              (json-parse-string body :object-type 'alist :array-type 'list))))))))
 
 (defun agent-shell-matrix-webhook--process-message (payload)
   "Process incoming webhook message from matrix-proxy-bot."
@@ -155,6 +188,8 @@ Returns parsed JSON response."
      ;; Command: handoff_end
      ((and action (string= action "handoff_end"))
       (setq agent-shell-matrix-handoff--state nil)
+      (advice-remove 'agent-shell--on-notification
+                     #'agent-shell-matrix-handoff--notification-advice)
       (message "✓ Session returned to Emacs"))
 
      ;; Command: set_mode
@@ -326,6 +361,13 @@ Returns parsed JSON response."
     (process-send-string process response)
     (delete-process process)))
 
+(defun agent-shell-matrix-webhook--check-auth (buffer-str)
+  "Validate Authorization header in HTTP request BUFFER-STR."
+  (let ((header-end (or (string-match "\r\n\r\n" buffer-str) (length buffer-str))))
+    (when (string-match "Authorization: *Bearer +\\(\\S-+\\)" (substring buffer-str 0 header-end))
+      (string= (match-string 1 (substring buffer-str 0 header-end))
+               agent-shell-matrix-webhook-secret))))
+
 (defun agent-shell-matrix-webhook--client-filter (process data)
   "Filter for webhook client connections."
   (let ((buffer (gethash process agent-shell-matrix-webhook-connections)))
@@ -334,29 +376,26 @@ Returns parsed JSON response."
       (puthash process buffer agent-shell-matrix-webhook-connections))
     (with-current-buffer buffer
       (insert data)
-      ;; Check if we have complete HTTP request (double CRLF)
       (when (string-match "\r\n\r\n" (buffer-string))
-        (let ((payload (agent-shell-matrix-webhook--parse-http-body (buffer-string))))
-          (if payload
-              (progn
-                (agent-shell-matrix-webhook--process-message payload)
-                (agent-shell-matrix-webhook--send-response process 200 "{\"status\":\"ok\"}"))
-            (agent-shell-matrix-webhook--send-response process 400 "{\"error\":\"Invalid JSON\"}")))
+        (let ((request (buffer-string)))
+          (cond
+           ((not (agent-shell-matrix-webhook--check-auth request))
+            (agent-shell-matrix-webhook--send-response process 401 "{\"error\":\"Unauthorized\"}"))
+           (t
+            (let ((payload (agent-shell-matrix-webhook--parse-http-body request)))
+              (if payload
+                  (progn
+                    (agent-shell-matrix-webhook--process-message payload)
+                    (agent-shell-matrix-webhook--send-response process 200 "{\"status\":\"ok\"}"))
+                (agent-shell-matrix-webhook--send-response process 400 "{\"error\":\"Invalid JSON\"}"))))))
         (remhash process agent-shell-matrix-webhook-connections)
         (kill-buffer buffer)))))
-
-(defun agent-shell-matrix-webhook--server-sentinel (server-process event)
-  "Sentinel for accepting webhook connections.
-When a client connects, server-process is the client connection."
-  (let ((event-str (string-trim event)))
-    (when (or (string= event-str "open") (string-match "^open" event-str))
-      ;; A client has connected; server-process is actually the client connection
-      (set-process-filter server-process 'agent-shell-matrix-webhook--client-filter))))
 
 ;;;###autoload
 (defun agent-shell-matrix-webhook-start ()
   "Start the webhook server listening for matrix-proxy-bot calls."
   (interactive)
+  (agent-shell-matrix-handoff--ensure-secret)
   (unless agent-shell-matrix-webhook-connections
     (setq agent-shell-matrix-webhook-connections (make-hash-table)))
   
@@ -368,7 +407,7 @@ When a client connects, server-process is the client connection."
            :service agent-shell-matrix-webhook-port
            :server t
            :host agent-shell-matrix-webhook-host
-           :sentinel 'agent-shell-matrix-webhook--server-sentinel
+           :filter #'agent-shell-matrix-webhook--client-filter
            :noquery t))
     (message "✓ Webhook server started on :%d" agent-shell-matrix-webhook-port)))
 
@@ -411,7 +450,7 @@ Use M-x agent-shell-matrix-return to bring the session back."
                                                      (format "http://%s:%d/webhook"
                                                              agent-shell-matrix-webhook-host
                                                              agent-shell-matrix-webhook-port)))
-                             (cons "webhook_secret" "test-secret")))
+                             (cons "webhook_secret" agent-shell-matrix-webhook-secret)))
          (capabilities (agent-shell-matrix-handoff--get-capabilities))
          (handoff-data (append handoff-data capabilities))
          (handoff-data (if (and context (not (string-empty-p context)))
@@ -430,6 +469,10 @@ Use M-x agent-shell-matrix-return to bring the session back."
           (list (cons "room_id" room-id)
                 (cons "session_id" session-id)
                 (cons "shell_buffer" (current-buffer))))
+    
+    ;; Install notification advice for relaying output
+    (advice-add 'agent-shell--on-notification :around
+                #'agent-shell-matrix-handoff--notification-advice)
     
     (message "✓ Handed off to Matrix: %s" room-id)))
 
@@ -453,6 +496,9 @@ Notifies the bot to return ownership to Emacs and ends the handoff."
            (cons "action" "handoff_end")))
     
     (setq agent-shell-matrix-handoff--state nil)
+    ;; Remove notification advice
+    (advice-remove 'agent-shell--on-notification
+                   #'agent-shell-matrix-handoff--notification-advice)
     (message "✓ Session returned to Emacs")))
 
 ;;;###autoload
@@ -467,11 +513,6 @@ If no active handoff, initiates one. If active, returns to Emacs."
 (with-eval-after-load 'agent-shell
   (define-key agent-shell-mode-map (kbd "C-c H") #'agent-shell-matrix-toggle))
 
-;; Install advice to relay agent output and tool calls to Matrix
-(advice-add 'agent-shell--on-notification :around
-            #'agent-shell-matrix-handoff--notification-advice)
-
 (provide 'agent-shell-matrix-handoff)
 
 ;;; agent-shell-matrix-handoff.el ends here
-
