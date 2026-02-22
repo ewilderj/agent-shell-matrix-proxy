@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "agent-shell-matrix-proxy"
 version = "0.1.0"
 description = "Matrix ↔ Agent-Shell webhook relay bot"
-readme = "README.org"
+readme = {file = "README.org", content-type = "text/plain"}
 license = {text = "GPL-3.0-or-later"}
 authors = [
     {name = "Edd Wilder-James", email = "edd@example.com"}
