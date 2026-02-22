@@ -93,7 +93,7 @@ sudo apt-get install libolm-dev cmake build-essential libssl-dev
 uv sync --extra e2e
 #+end_src
 
-The bot bootstraps cross-signing keys automatically. See [[file:IMPLEMENTATION.md][IMPLEMENTATION.md]]
+The bot bootstraps cross-signing keys automatically. See [[file:IMPLEMENTATION.org][IMPLEMENTATION.org]]
 for details on the encryption architecture.
 
 * Emacs Integration
