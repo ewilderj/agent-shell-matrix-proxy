@@ -37,3 +37,4 @@ htmlcov/
 /.venv
 /.ruff_cache
 *.backup
+*.elc
