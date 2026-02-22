@@ -52,14 +52,14 @@ cp .env.example .env
 
 Edit =.env= with your settings:
 
-| Variable              | Description                                       |
-|-----------------------+---------------------------------------------------|
-| =MATRIX_HOMESERVER=   | Your homeserver URL (e.g. =https://eddpod.com=)   |
-| =MATRIX_BOT_USER_ID= | Bot account (e.g. =@copilot:eddpod.com=)          |
-| =MATRIX_BOT_PASSWORD= | Password for first login (removed after)          |
-| =WEBHOOK_SECRET=      | Shared secret for webhook auth                    |
-| =ALLOWED_USERS=       | Comma-separated Matrix user IDs to whitelist      |
-| =LOG_LEVEL=           | Logging level (default: =INFO=)                   |
+| Variable            | Description                                   |
+|---------------------+-----------------------------------------------|
+| =MATRIX_HOMESERVER=   | Your homeserver URL (e.g. =https://eddpod.com=) |
+| =MATRIX_BOT_USER_ID=  | Bot account (e.g. =@copilot:eddpod.com=)        |
+| =MATRIX_BOT_PASSWORD= | Password for first login (removed after)      |
+| =WEBHOOK_SECRET=      | Shared secret for webhook auth                |
+| =ALLOWED_USERS=       | Comma-separated Matrix user IDs to whitelist  |
+| =LOG_LEVEL=           | Logging level (default: =INFO=)                 |
 
 ** 3. First run
 
@@ -115,13 +115,13 @@ in your init:
 
 In any =agent-shell= buffer:
 
-| Command                         | Action                                        |
-|---------------------------------+-----------------------------------------------|
-| =M-x agent-shell-matrix-handoff= | Hand current session to Matrix                |
-| =M-x agent-shell-matrix-return=  | Bring session back to Emacs                   |
+| Command                        | Action                         |
+|--------------------------------+--------------------------------|
+| =M-x agent-shell-matrix-handoff= | Hand current session to Matrix |
+| =M-x agent-shell-matrix-return=  | Bring session back to Emacs    |
 
 When you hand off, the bot creates a private Matrix room (named
-=#agent-{hostname}-{hash}=), invites your whitelisted users, and posts
+=#agent-{hostname}-{number}=), invites your whitelisted users, and posts
 recent conversation context. Messages typed in Matrix are relayed to
 agent-shell; responses flow back to the room.
 
@@ -137,33 +137,33 @@ In an active session room, type =!help= to see all available commands.
 
 ** Built-in commands
 
-| Command    | Description                   |
-|------------+-------------------------------|
-| =!status=  | Show session info and TTL     |
-| =!help=    | List all available commands   |
-| =!return=  | Hand session back to Emacs    |
-| =!close=   | Archive and close the session |
+| Command | Description                   |
+|---------+-------------------------------|
+| =!status= | Show session info and TTL     |
+| =!help=   | List all available commands   |
+| =!return= | Hand session back to Emacs    |
+| =!close=  | Archive and close the session |
 
 ** Dynamic mode commands
 
 Mode commands are populated from your agent-shell configuration. Typical
 modes:
 
-| Command       | Description                                |
-|---------------+--------------------------------------------|
-| =!plan=       | Switch to Plan mode                        |
-| =!agent=      | Switch to Agent mode                       |
-| =!autopilot=  | Switch to Autopilot mode                   |
+| Command    | Description              |
+|------------+--------------------------|
+| =!plan=      | Switch to Plan mode      |
+| =!agent=     | Switch to Agent mode     |
+| =!autopilot= | Switch to Autopilot mode |
 
 The current mode is shown with a =●= marker in =!help= output. Mode
 changes are sent to Emacs and take effect immediately.
 
 ** Model commands
 
-| Command              | Description                              |
-|----------------------+------------------------------------------|
-| =!model=             | Show current model                       |
-| =!model <name>=      | Switch to a model (supports partial match) |
+| Command       | Description                                |
+|---------------+--------------------------------------------|
+| =!model=        | Show current model                         |
+| =!model <name>= | Switch to a model (supports partial match) |
 
 Model matching is flexible — =!model sonnet= matches =claude-sonnet-4-20250514=,
 for example. If your query is ambiguous, the bot tells you.
@@ -172,12 +172,12 @@ for example. If your query is ambiguous, the bot tells you.
 
 The bot exposes an HTTP API for programmatic access:
 
-| Endpoint                 | Method | Description            |
-|--------------------------+--------+------------------------|
-| =/handoff=               | POST   | Initiate session       |
-| =/webhook/message=       | POST   | Relay message to room  |
-| =/session/{room_id}=     | GET    | Query session status   |
-| =/sessions=              | GET    | List active sessions   |
+| Endpoint           | Method | Description           |
+|--------------------+--------+-----------------------|
+| =/handoff=           | POST   | Initiate session      |
+| =/webhook/message=   | POST   | Relay message to room |
+| =/session/{room_id}= | GET    | Query session status  |
+| =/sessions=          | GET    | List active sessions  |
 
 All endpoints require =Authorization: Bearer <webhook-secret>=.
 
@@ -246,4 +246,4 @@ history is stored — the bot is a stateless relay.
 
 * License
 
-MIT
+GPL-3.0-or-later
