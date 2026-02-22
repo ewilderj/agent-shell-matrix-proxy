@@ -8,7 +8,7 @@ A fully functional Matrix relay bot enabling portable agent-shell sessions betwe
 
 ✅ **Session Handoff**
 - Emacs initiates handoff → Bot creates private Matrix room
-- Room named `#agent-{hostname}-{session_hash}` (readable)
+- Room named `agent-{hostname}` (with `.N` suffix for multiple sessions)
 - Session metadata stored in SQLite with webhook URLs, TTL, owner tracking
 
 ✅ **Message Relay**
