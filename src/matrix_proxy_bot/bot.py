@@ -905,10 +905,13 @@ class ProxyBot:
             while not queue.empty():
                 next_msg, next_fmt, next_fmt_type = queue.get_nowait()
                 msg = msg + "\n" + next_msg
-                # If any message has formatting, combine as plain text
                 if next_fmt:
-                    fmt_body = None
-                    fmt_type = None
+                    # Combine HTML bodies
+                    fmt_body = (fmt_body or "") + "\n" + next_fmt
+                    fmt_type = fmt_type or next_fmt_type
+                elif fmt_body:
+                    # Prior message had HTML; wrap plain text addition
+                    fmt_body = fmt_body + "\n<p>" + next_msg + "</p>"
 
             await self._send_to_room_now(room_id, msg, fmt_body, fmt_type)
 
