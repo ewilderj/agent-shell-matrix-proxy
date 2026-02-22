@@ -257,6 +257,10 @@ Sessions are stored in SQLite (=~/.agent-shell-matrix-proxy/sessions.db=).
 Schema migrations are applied automatically on startup. No conversation
 history is stored — the bot is a stateless relay.
 
+* Related Projects
+
+- [[https://github.com/ElleNajt/agent-shell-to-go][agent-shell-to-go]] — Similar concept using Slack instead of Matrix. Pure elisp, no external bot process.
+
 * License
 
 GPL-3.0-or-later
