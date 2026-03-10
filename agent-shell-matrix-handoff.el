@@ -307,6 +307,17 @@ Validates Content-Length before parsing to avoid truncated payloads."
                    "-d" json-data
                    url)))
 
+(defun agent-shell-matrix-handoff--extract-notification (args)
+  "Extract the notification payload from advised agent-shell ARGS."
+  (cond
+   ((and (listp args) (plist-member args :acp-notification))
+    (plist-get args :acp-notification))
+   ((and (listp args) (plist-member args :notification))
+    (plist-get args :notification))
+   ((and (= (length args) 1) (listp (car args)))
+    (car args))
+   (t nil)))
+
 (defun agent-shell-matrix-handoff--flush-output ()
   "Send accumulated agent output to Matrix room and stop typing."
   (when (and agent-shell-matrix-handoff--state
@@ -328,7 +339,7 @@ Validates Content-Length before parsing to avoid truncated payloads."
   "Advice around agent-shell--on-notification to relay to Matrix during handoff."
   (apply orig-fun args)
   (when agent-shell-matrix-handoff--state
-    (let* ((notification (plist-get args :notification))
+    (let* ((notification (agent-shell-matrix-handoff--extract-notification args))
            (update (map-elt (map-elt notification 'params) 'update))
            (session-update (and update (map-elt update 'sessionUpdate))))
       (cond
