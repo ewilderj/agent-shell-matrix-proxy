@@ -39,3 +39,4 @@ htmlcov/
 *.backup
 *.elc
 .agent-shell/
+agent-shell-matrix-proxy.service
