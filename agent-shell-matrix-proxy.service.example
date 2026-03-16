@@ -1,0 +1,24 @@
+[Unit]
+Description=Agent Shell Matrix Proxy
+After=network-online.target
+
+[Service]
+Type=simple
+# Update this to the directory where you cloned the repository
+WorkingDirectory=/path/to/agent-shell-matrix-proxy
+# Update this to the path of your uv executable if it's not in the default path
+ExecStart=/usr/local/bin/uv run -m matrix_proxy_bot
+Restart=always
+RestartSec=10
+
+# Environment
+# Point this to your .env file containing the Matrix credentials
+EnvironmentFile=/path/to/agent-shell-matrix-proxy/.env
+
+# Logging — stdout/stderr go to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agent-shell-matrix-proxy
+
+[Install]
+WantedBy=default.target
