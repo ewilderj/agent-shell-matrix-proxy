@@ -31,6 +31,9 @@
 (declare-function acp-make-session-set-model-request "acp")
 (declare-function agent-shell--state "agent-shell")
 (declare-function agent-shell--get-available-modes "agent-shell")
+(declare-function agent-shell-subscribe-to "agent-shell")
+(declare-function agent-shell-unsubscribe "agent-shell")
+(defvar agent-shell-idle-timeout)
 
 (defvar agent-shell-matrix-handoff--state nil
   "State during Matrix handoff session.
@@ -72,6 +75,22 @@ Must be set before use."
   "URL the bot should use to reach the webhook server.
 If nil, defaults to http://<webhook-host>:<webhook-port>/webhook."
   :type '(choice (const :tag "Auto-detect" nil) string)
+  :group 'agent-shell-matrix)
+
+(defcustom agent-shell-matrix-handoff-idle-timeout
+  '((permission-request . 300)
+    (turn-complete . 3600))
+  "Per-event idle timeouts in seconds during Matrix handoff.
+
+When handoff is active, this value is applied buffer-locally to
+`agent-shell-idle-timeout' so the agent emits an `idle' event after the
+specified seconds of inactivity following each named event.  The handoff
+relays those idle events to the Matrix room as a nudge that the agent is
+waiting for input.
+
+See `agent-shell-idle-timeout' for the supported format (number or alist)."
+  :type '(choice (number :tag "Single timeout (seconds)")
+                 (alist :key-type symbol :value-type integer))
   :group 'agent-shell-matrix)
 
 (defvar agent-shell-matrix-webhook-server-process nil
@@ -187,9 +206,7 @@ Validates Content-Length before parsing to avoid truncated payloads."
     (cond
      ;; Command: handoff_end
      ((and action (string= action "handoff_end"))
-      (setq agent-shell-matrix-handoff--state nil)
-      (advice-remove 'agent-shell--on-notification
-                     #'agent-shell-matrix-handoff--notification-advice)
+      (agent-shell-matrix-handoff--cleanup)
       (message "✓ Session returned to Emacs"))
 
      ;; Command: set_mode
@@ -336,14 +353,20 @@ Validates Content-Length before parsing to avoid truncated payloads."
         (setq agent-shell-matrix-handoff--typing nil)))))
 
 (defun agent-shell-matrix-handoff--notification-advice (orig-fun &rest args)
-  "Advice around agent-shell--on-notification to relay to Matrix during handoff."
+  "Advice around `agent-shell--on-notification' to relay streaming text.
+
+Streams `agent_message_chunk' content to Matrix during handoff.  Tool
+calls, turn completion, and idle nudges are handled separately via
+`agent-shell-subscribe-to' (see
+`agent-shell-matrix-handoff--install-subscriptions') since those are
+exposed as first-class events upstream.  Streaming text chunks are not
+yet exposed as events, so this advice remains for that one case."
   (apply orig-fun args)
   (when agent-shell-matrix-handoff--state
     (let* ((notification (agent-shell-matrix-handoff--extract-notification args))
            (update (map-elt (map-elt notification 'params) 'update))
            (session-update (and update (map-elt update 'sessionUpdate))))
-      (cond
-       ((equal session-update "agent_message_chunk")
+      (when (equal session-update "agent_message_chunk")
         (let ((text (map-nested-elt update '(content text))))
           (when text
             (setq agent-shell-matrix-handoff--output-buffer
@@ -351,17 +374,140 @@ Validates Content-Length before parsing to avoid truncated payloads."
             (when agent-shell-matrix-handoff--relay-timer
               (cancel-timer agent-shell-matrix-handoff--relay-timer))
             (setq agent-shell-matrix-handoff--relay-timer
-                  (run-at-time 2.0 nil #'agent-shell-matrix-handoff--flush-output)))))
-       ((equal session-update "tool_call")
-        (let ((title (map-elt update 'title)))
-          (when title
-            (agent-shell-matrix-handoff--flush-output)
-            (let ((room-id (cdr (assoc "room_id" agent-shell-matrix-handoff--state)))
-                  (session-id (cdr (assoc "session_id" agent-shell-matrix-handoff--state))))
-              (when room-id
-                (agent-shell-matrix-handoff--relay-async
-                 room-id session-id
-                 (format "🔧 %s" title)))))))))))
+                  (run-at-time 2.0 nil #'agent-shell-matrix-handoff--flush-output))))))))
+
+;;; Event subscriptions (idle / tool-call / turn-complete)
+;;
+;; Upstream agent-shell exposes a pub/sub event system via
+;; `agent-shell-subscribe-to'.  We use it for everything that has a
+;; first-class event:
+;;
+;;   tool-call-update -> relay "🔧 title" to Matrix
+;;   turn-complete    -> flush any pending streamed text
+;;   idle             -> nudge Matrix that the agent is waiting on the user
+;;
+;; Subscription tokens live in `agent-shell-matrix-handoff--state' so that
+;; `agent-shell-matrix-return' can unsubscribe symmetrically.
+
+(defun agent-shell-matrix-handoff--state-room-id ()
+  "Return current handoff room id, or nil."
+  (cdr (assoc "room_id" agent-shell-matrix-handoff--state)))
+
+(defun agent-shell-matrix-handoff--state-session-id ()
+  "Return current handoff session id, or nil."
+  (cdr (assoc "session_id" agent-shell-matrix-handoff--state)))
+
+(defun agent-shell-matrix-handoff--on-tool-call-update (event)
+  "Relay tool-call updates from EVENT to the Matrix room.
+Deduplicates by `:tool-call-id' so a single tool only emits one Matrix
+line per turn, regardless of how many `tool-call-update' events fire."
+  (when agent-shell-matrix-handoff--state
+    (let* ((data (map-elt event :data))
+           (tool-call-id (map-elt data :tool-call-id))
+           (tool-call (map-elt data :tool-call))
+           (title (map-elt tool-call :title))
+           (room-id (agent-shell-matrix-handoff--state-room-id))
+           (session-id (agent-shell-matrix-handoff--state-session-id))
+           (announced (cdr (assoc "announced_tool_calls"
+                                  agent-shell-matrix-handoff--state))))
+      (when (and title room-id tool-call-id
+                 (not (member tool-call-id announced)))
+        (setf (alist-get "announced_tool_calls"
+                         agent-shell-matrix-handoff--state nil nil #'equal)
+              (cons tool-call-id announced))
+        (agent-shell-matrix-handoff--flush-output)
+        (agent-shell-matrix-handoff--relay-async
+         room-id session-id (format "🔧 %s" title))))))
+
+(defun agent-shell-matrix-handoff--on-turn-complete (_event)
+  "Flush pending text and reset per-turn dedup state."
+  (when agent-shell-matrix-handoff--state
+    (agent-shell-matrix-handoff--flush-output)
+    (setf (alist-get "announced_tool_calls"
+                     agent-shell-matrix-handoff--state nil nil #'equal)
+          nil)))
+
+(defun agent-shell-matrix-handoff--idle-message (idle-event)
+  "Format the Matrix nudge string for IDLE-EVENT."
+  (pcase idle-event
+    ('permission-request "⏰ Agent is waiting for a permission decision")
+    ('turn-complete      "💤 Agent is idle — awaiting your next prompt")
+    (_ (format "⏰ Agent idle (after %s)" idle-event))))
+
+(defun agent-shell-matrix-handoff--on-idle (event)
+  "Relay an idle nudge from EVENT to the Matrix room."
+  (when agent-shell-matrix-handoff--state
+    (let* ((data (map-elt event :data))
+           (idle-event (map-elt data :idle-event))
+           (room-id (agent-shell-matrix-handoff--state-room-id))
+           (session-id (agent-shell-matrix-handoff--state-session-id)))
+      (when room-id
+        (agent-shell-matrix-handoff--flush-output)
+        (agent-shell-matrix-handoff--relay-async
+         room-id session-id
+         (agent-shell-matrix-handoff--idle-message idle-event))))))
+
+(defun agent-shell-matrix-handoff--on-clean-up (_event)
+  "Tear down handoff if the underlying agent-shell buffer dies."
+  (when agent-shell-matrix-handoff--state
+    (agent-shell-matrix-handoff--cleanup)
+    (message "Matrix handoff ended (agent-shell buffer was killed)")))
+
+(defun agent-shell-matrix-handoff--install-subscriptions (shell-buffer)
+  "Subscribe to agent-shell pub/sub events on SHELL-BUFFER.
+Returns a list of subscription tokens for later cleanup."
+  (list (agent-shell-subscribe-to
+         :shell-buffer shell-buffer
+         :event 'tool-call-update
+         :on-event #'agent-shell-matrix-handoff--on-tool-call-update)
+        (agent-shell-subscribe-to
+         :shell-buffer shell-buffer
+         :event 'turn-complete
+         :on-event #'agent-shell-matrix-handoff--on-turn-complete)
+        (agent-shell-subscribe-to
+         :shell-buffer shell-buffer
+         :event 'idle
+         :on-event #'agent-shell-matrix-handoff--on-idle)
+        (agent-shell-subscribe-to
+         :shell-buffer shell-buffer
+         :event 'clean-up
+         :on-event #'agent-shell-matrix-handoff--on-clean-up)))
+
+(defun agent-shell-matrix-handoff--remove-subscriptions (shell-buffer tokens)
+  "Unsubscribe TOKENS from SHELL-BUFFER (no-op if buffer is dead)."
+  (when (buffer-live-p shell-buffer)
+    (with-current-buffer shell-buffer
+      (dolist (tok tokens)
+        (ignore-errors
+          (agent-shell-unsubscribe :subscription tok))))))
+
+(defun agent-shell-matrix-handoff--cleanup ()
+  "Unwind all handoff side effects.
+Idempotent: safe to call from `agent-shell-matrix-return',
+the webhook `handoff_end' branch, or the upstream `clean-up' event."
+  (let ((shell-buffer (cdr (assoc "shell_buffer" agent-shell-matrix-handoff--state)))
+        (tokens (cdr (assoc "subscriptions" agent-shell-matrix-handoff--state))))
+    (when tokens
+      (agent-shell-matrix-handoff--remove-subscriptions shell-buffer tokens))
+    (when (buffer-live-p shell-buffer)
+      (with-current-buffer shell-buffer
+        (kill-local-variable 'agent-shell-idle-timeout)))
+    (when agent-shell-matrix-handoff--relay-timer
+      (cancel-timer agent-shell-matrix-handoff--relay-timer)
+      (setq agent-shell-matrix-handoff--relay-timer nil))
+    (setq agent-shell-matrix-handoff--output-buffer "")
+    (setq agent-shell-matrix-handoff--typing nil)
+    (setq agent-shell-matrix-handoff--state nil)
+    (advice-remove 'agent-shell--on-notification
+                   #'agent-shell-matrix-handoff--notification-advice)))
+
+(defun agent-shell-matrix-handoff--check-upstream-api ()
+  "Error if the running `agent-shell' lacks the pub/sub idle-events API."
+  (unless (and (fboundp 'agent-shell-subscribe-to)
+               (fboundp 'agent-shell-unsubscribe)
+               (boundp 'agent-shell-idle-timeout))
+    (user-error
+     "Matrix handoff requires a newer agent-shell with pub/sub idle events")))
 
 (defun agent-shell-matrix-webhook--send-response (process status-code body)
   "Send HTTP response to PROCESS with STATUS-CODE and JSON BODY."
@@ -445,7 +591,10 @@ Use M-x agent-shell-matrix-return to bring the session back."
   (interactive)
   (unless (derived-mode-p 'agent-shell-mode)
     (error "Not in agent-shell buffer"))
-  
+  (when agent-shell-matrix-handoff--state
+    (user-error "A Matrix handoff is already active; M-x agent-shell-matrix-return first"))
+  (agent-shell-matrix-handoff--check-upstream-api)
+
   ;; Start webhook server if not running
   (unless agent-shell-matrix-webhook-server-process
     (agent-shell-matrix-webhook-start))
@@ -480,11 +629,26 @@ Use M-x agent-shell-matrix-return to bring the session back."
           (list (cons "room_id" room-id)
                 (cons "session_id" session-id)
                 (cons "shell_buffer" (current-buffer))))
-    
-    ;; Install notification advice for relaying output
+
+    ;; Apply per-event idle timeouts buffer-locally so the agent emits
+    ;; `idle' events on a schedule appropriate for handoff (short for
+    ;; permission requests, longer for turn-complete).
+    (setq-local agent-shell-idle-timeout
+                agent-shell-matrix-handoff-idle-timeout)
+
+    ;; Subscribe to first-class events (tool calls, turn end, idle).
+    ;; Tokens go in the handoff state so `agent-shell-matrix-return' can
+    ;; tear them down symmetrically.
+    (let ((tokens (agent-shell-matrix-handoff--install-subscriptions
+                   (current-buffer))))
+      (push (cons "subscriptions" tokens)
+            agent-shell-matrix-handoff--state))
+
+    ;; Streaming text chunks aren't exposed as pub/sub events yet, so we
+    ;; still need a narrow advice for `agent_message_chunk' relay.
     (advice-add 'agent-shell--on-notification :around
                 #'agent-shell-matrix-handoff--notification-advice)
-    
+
     (message "✓ Handed off to Matrix: %s" room-id)))
 
 ;;;###autoload
@@ -498,18 +662,15 @@ Notifies the bot to return ownership to Emacs and ends the handoff."
   
   (let ((room-id (cdr (assoc "room_id" agent-shell-matrix-handoff--state)))
         (session-id (cdr (assoc "session_id" agent-shell-matrix-handoff--state))))
-    
+
     (agent-shell-matrix-handoff--call-bot
      "/webhook/message"
      "POST"
      (list (cons "room_id" room-id)
            (cons "session_id" session-id)
            (cons "action" "handoff_end")))
-    
-    (setq agent-shell-matrix-handoff--state nil)
-    ;; Remove notification advice
-    (advice-remove 'agent-shell--on-notification
-                   #'agent-shell-matrix-handoff--notification-advice)
+
+    (agent-shell-matrix-handoff--cleanup)
     (message "✓ Session returned to Emacs")))
 
 ;;;###autoload
