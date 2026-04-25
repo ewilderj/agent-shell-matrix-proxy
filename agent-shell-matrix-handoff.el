@@ -78,8 +78,8 @@ If nil, defaults to http://<webhook-host>:<webhook-port>/webhook."
   :group 'agent-shell-matrix)
 
 (defcustom agent-shell-matrix-handoff-idle-timeout
-  '((permission-request . 15)
-    (turn-complete . 60))
+  '((permission-request . 300)
+    (turn-complete . 3600))
   "Per-event idle timeouts in seconds during Matrix handoff.
 
 When handoff is active, this value is applied buffer-locally to
