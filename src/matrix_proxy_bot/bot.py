@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import uvicorn
 from nio import AsyncClient, RoomMessageText, RoomMessageUnknown, RoomCreateResponse, RoomVisibility, MatrixRoom
-from nio.responses import LoginError, KeysQueryError
+from nio.responses import LoginError, KeysQueryError, SyncError, SyncResponse
 from nio.events.room_events import UnknownEvent
 
 # E2E encryption (optional)
@@ -562,17 +562,72 @@ class ProxyBot:
                 logger.error(f"TTL scheduler error: {e}")
                 await asyncio.sleep(5)
 
+    # Sync loop backoff bounds (seconds).
+    SYNC_BACKOFF_INITIAL = 1.0
+    SYNC_BACKOFF_MAX = 60.0
+
+    # status_code values that mean "stop retrying, the operator must intervene".
+    _FATAL_AUTH_STATUS = frozenset({"M_UNKNOWN_TOKEN", "M_MISSING_TOKEN"})
+
     async def _sync_loop(self):
-        """Sync with Matrix homeserver, listen for messages."""
-        logger.info("Starting sync_forever loop...")
-        try:
-            await self.client.sync_forever(timeout=30000, sync_filter={"presence": {"types": []}})
-        except Exception as e:
-            logger.exception(f"Sync loop crashed: {e}")
-            # sync_forever crashed, wait and restart
-            await asyncio.sleep(5)
-            logger.info("Restarting sync loop...")
-            asyncio.create_task(self._sync_loop())
+        """Sync with Matrix homeserver, listen for messages.
+
+        Replaces nio's ``sync_forever`` which retries internally with no
+        useful backoff: on M_UNKNOWN_TOKEN it spins, flooding the journal
+        with thousands of 'next_batch is a required property' warnings per
+        minute.
+
+        Strategy:
+          * Fatal auth failures → log + return; systemd RestartSec gives the
+            operator a window to refresh MATRIX_ACCESS_TOKEN.
+          * Other errors (network, 5xx, parse failures) → exponential
+            backoff 1s → 60s, reset to 1s on the next successful sync.
+        """
+        logger.info("Starting sync loop...")
+        backoff = self.SYNC_BACKOFF_INITIAL
+        sync_filter = {"presence": {"types": []}}
+
+        while True:
+            try:
+                response = await self.client.sync(
+                    timeout=30000,
+                    sync_filter=sync_filter,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.exception(
+                    f"Sync raised exception: {e}; backing off {backoff:.1f}s"
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, self.SYNC_BACKOFF_MAX)
+                continue
+
+            if isinstance(response, SyncError):
+                if (
+                    response.status_code in self._FATAL_AUTH_STATUS
+                    or response.soft_logout
+                ):
+                    logger.error(
+                        "Matrix auth failed "
+                        f"(status_code={response.status_code}, "
+                        f"soft_logout={response.soft_logout}): "
+                        f"{response.message}. "
+                        "Refresh MATRIX_ACCESS_TOKEN and restart; exiting sync loop."
+                    )
+                    return
+
+                logger.warning(
+                    f"Sync error (status_code={response.status_code}): "
+                    f"{response.message}; backing off {backoff:.1f}s"
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, self.SYNC_BACKOFF_MAX)
+                continue
+
+            if backoff != self.SYNC_BACKOFF_INITIAL:
+                logger.info("Sync recovered; resetting backoff")
+            backoff = self.SYNC_BACKOFF_INITIAL
 
     async def _handle_room_message(self, room_id: str, event: RoomMessageText):
         """Handle incoming Matrix room message."""

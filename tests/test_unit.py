@@ -251,3 +251,136 @@ class TestDynamicCommands:
         target = "gpt"
         match = next((m for m in models if m.startswith(target) or target in m), None)
         assert match == "gpt-4.1"
+
+
+# --- Sync loop tests ---
+
+class TestSyncLoop:
+    """Verify _sync_loop handles errors with backoff and exits on auth failure."""
+
+    def _make_bot(self):
+        """Build a ProxyBot instance without invoking __init__ (avoids FastAPI/Config wiring)."""
+        from matrix_proxy_bot.bot import ProxyBot
+        bot = ProxyBot.__new__(ProxyBot)
+        bot.client = MagicMock()
+        return bot
+
+    @pytest.mark.asyncio
+    async def test_exits_on_unknown_token(self):
+        from matrix_proxy_bot.bot import ProxyBot
+        from nio.responses import SyncError
+
+        bot = self._make_bot()
+        bot.client.sync = AsyncMock(return_value=SyncError(
+            message="Invalid access token", status_code="M_UNKNOWN_TOKEN"
+        ))
+
+        # Should return cleanly without hitting sleep — finishes in well under a second.
+        await asyncio.wait_for(bot._sync_loop(), timeout=1.0)
+        assert bot.client.sync.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_exits_on_soft_logout(self):
+        from nio.responses import SyncError
+
+        bot = self._make_bot()
+        bot.client.sync = AsyncMock(return_value=SyncError(
+            message="Soft logout", status_code="M_FORBIDDEN", soft_logout=True
+        ))
+
+        await asyncio.wait_for(bot._sync_loop(), timeout=1.0)
+        assert bot.client.sync.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_backoff_on_transient_error_then_recover(self, monkeypatch):
+        from matrix_proxy_bot.bot import ProxyBot
+        from nio.responses import SyncError, SyncResponse
+
+        bot = self._make_bot()
+
+        # Shrink bounds so the test is fast.
+        monkeypatch.setattr(ProxyBot, "SYNC_BACKOFF_INITIAL", 0.01)
+        monkeypatch.setattr(ProxyBot, "SYNC_BACKOFF_MAX", 0.04)
+
+        sleeps = []
+        real_sleep = asyncio.sleep
+
+        async def fake_sleep(d):
+            sleeps.append(d)
+            await real_sleep(0)
+
+        monkeypatch.setattr("matrix_proxy_bot.bot.asyncio.sleep", fake_sleep)
+
+        # Two transient errors, one success, then a fatal to terminate the loop.
+        ok = SyncResponse(
+            next_batch="s1", rooms=MagicMock(), device_key_count={},
+            device_list=MagicMock(), to_device_events=[], presence_events=[],
+        )
+        responses = [
+            SyncError(message="boom1", status_code="M_UNKNOWN"),
+            SyncError(message="boom2", status_code="M_UNKNOWN"),
+            ok,
+            SyncError(message="bye", status_code="M_UNKNOWN_TOKEN"),
+        ]
+        bot.client.sync = AsyncMock(side_effect=responses)
+
+        await asyncio.wait_for(bot._sync_loop(), timeout=1.0)
+
+        # Two transient errors → sleeps of 0.01 then 0.02 (exponential).
+        # Success resets, fatal exits without sleeping.
+        assert sleeps == [0.01, 0.02]
+        assert bot.client.sync.await_count == 4
+
+    @pytest.mark.asyncio
+    async def test_backoff_caps_at_max(self, monkeypatch):
+        from matrix_proxy_bot.bot import ProxyBot
+        from nio.responses import SyncError
+
+        bot = self._make_bot()
+        monkeypatch.setattr(ProxyBot, "SYNC_BACKOFF_INITIAL", 0.01)
+        monkeypatch.setattr(ProxyBot, "SYNC_BACKOFF_MAX", 0.03)
+
+        sleeps = []
+        real_sleep = asyncio.sleep
+
+        async def fake_sleep(d):
+            sleeps.append(d)
+            await real_sleep(0)
+
+        monkeypatch.setattr("matrix_proxy_bot.bot.asyncio.sleep", fake_sleep)
+
+        errs = [SyncError(message="x", status_code="M_UNKNOWN") for _ in range(5)]
+        errs.append(SyncError(message="bye", status_code="M_UNKNOWN_TOKEN"))
+        bot.client.sync = AsyncMock(side_effect=errs)
+
+        await asyncio.wait_for(bot._sync_loop(), timeout=1.0)
+
+        # 0.01, 0.02, 0.03 (capped), 0.03, 0.03 — fatal at the end exits without sleeping.
+        assert sleeps == [0.01, 0.02, 0.03, 0.03, 0.03]
+
+    @pytest.mark.asyncio
+    async def test_backoff_on_exception(self, monkeypatch):
+        from matrix_proxy_bot.bot import ProxyBot
+        from nio.responses import SyncError
+
+        bot = self._make_bot()
+        monkeypatch.setattr(ProxyBot, "SYNC_BACKOFF_INITIAL", 0.01)
+        monkeypatch.setattr(ProxyBot, "SYNC_BACKOFF_MAX", 0.04)
+
+        sleeps = []
+        real_sleep = asyncio.sleep
+
+        async def fake_sleep(d):
+            sleeps.append(d)
+            await real_sleep(0)
+
+        monkeypatch.setattr("matrix_proxy_bot.bot.asyncio.sleep", fake_sleep)
+
+        bot.client.sync = AsyncMock(side_effect=[
+            ConnectionError("network down"),
+            ConnectionError("still down"),
+            SyncError(message="bye", status_code="M_UNKNOWN_TOKEN"),
+        ])
+
+        await asyncio.wait_for(bot._sync_loop(), timeout=1.0)
+        assert sleeps == [0.01, 0.02]
